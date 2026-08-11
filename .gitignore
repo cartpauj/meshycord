@@ -1,0 +1,15 @@
+# PlatformIO build output and downloaded dependencies
+.pio/
+
+# Serial/monitor scratch
+*.log
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Nothing secret is compiled into this firmware. WiFi credentials, the Discord
+# bot token and the BLE PIN all live in NVS on the device and are entered
+# through the web UI, so there is no config file to exclude here. If you add
+# one, exclude it.
