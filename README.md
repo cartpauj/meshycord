@@ -30,14 +30,17 @@ sudo dpkg -i meshycord_*_arm64.deb        # Pi 3/4/5, 64-bit OS
 sudo dpkg -i meshycord_*_armhf.deb        # Pi 2/3/4 on a 32-bit OS
 sudo dpkg -i meshycord_*_armhf-armv6.deb  # Pi Zero W, Pi 1  ← note the suffix
 sudo dpkg -i meshycord_*_amd64.deb        # any x86-64 Linux box
+sudo dpkg -i meshycord_*_i386.deb         # 32-bit x86
 ```
 
 **Pi Zero W and Pi 1 need the `-armv6` package.** Both it and the ARMv7 build
 are `armhf`, so the filename is the only thing telling them apart. The ARMv7
 binary will not run on an ARMv6 chip.
 
-Fedora and RHEL: use the matching `.rpm`. Anything else: take the `.tar.gz`,
-drop the binary in `/usr/bin`, and copy `deploy/meshycord.service`.
+Fedora and RHEL: use the matching `.rpm` — `x86_64`, `aarch64`, `armv7hl` or
+`i686`. There is no ARMv6 `.rpm`, so on a Pi Zero W use the `.deb` or the
+tarball. Anything else: take the `.tar.gz`, drop the binary in `/usr/bin`, and
+copy `deploy/meshycord.service`.
 
 The service starts automatically and listens on port **9150** — for the 915 MHz LoRa band.
 
@@ -72,8 +75,13 @@ rather than a cross-toolchain problem.
    **Manage Messages**. Open the generated URL and add it to your server.
 
 `Manage Channels` is what lets it create the channels and categories for you.
-`Manage Messages` is only used to delete a typed room-server password out of
-channel history — and with the `/mesh login` popup, it should never need to.
+
+`Manage Messages` is needed for two things. It deletes a room-server password out
+of channel history if you type one there, which the `/mesh login` popup avoids.
+More importantly it is how the bridge clears your 🔄 off a message: Discord only
+lets an app remove somebody else's reaction with this permission, and it sends no
+event for a reaction that is already present — so without it, a 🔄 works once and
+every press after that is silently ignored.
 
 ### 2. Point it at your server
 
@@ -89,14 +97,27 @@ default password is worse than none: it looks secure and is not. Until one is
 set, the console is open to anyone who can reach the machine, and every page
 says so.
 
+The account name is **`admin`** until you change it, in Settings. There is no
+default password to go with it — the username alone opens nothing. Changing
+either one signs out every existing session.
+
+Saving in the console takes effect without a restart: the Discord connection
+retries on a backoff and picks up a corrected token or server id within about a
+minute, then builds the categories and channels. Switching transport reconnects
+the radio straight away.
+
 All of this also works from the shell, for a headless install:
 
 ```sh
 sudo meshycord -db /var/lib/meshycord/db.sqlite -set-token 'YOUR.BOT.TOKEN'
 sudo meshycord -db /var/lib/meshycord/db.sqlite -set-guild 123456789012345678
 sudo meshycord -db /var/lib/meshycord/db.sqlite -set-password 'something long'
+sudo meshycord -db /var/lib/meshycord/db.sqlite -set-serial /dev/ttyACM0
 sudo systemctl restart meshycord
 ```
+
+Each of those stores the value and exits, so the running service needs a restart
+to pick it up.
 
 ### 3. Connect the radio
 
@@ -154,6 +175,12 @@ marker saying what happened:
 | ❌ | rejected, or no acknowledgement before the deadline |
 | 🔄 | *you* add this to your own failed message to ask for a resend, which also clears the stored route so the retry floods |
 
+⏳ does not hang around indefinitely. The node estimates how long the round trip
+should take, and the bridge waits that long, floored at a minute and capped at
+two. The floor is there because a four-second estimate would turn a perfectly
+good delivery into a ❌; the ceiling is there because a lost acknowledgement
+should not leave a message pending forever.
+
 The difference between ✅ and 📡 is not decoration: **MeshCore cannot
 acknowledge group messages at all.** A channel send can only ever be reported as
 transmitted, and a tick there would claim a delivery the protocol is incapable of
@@ -171,23 +198,58 @@ a round trip per post).
 
 ### Commands
 
-Use `/mesh` in Discord, or type the same commands in `#meshycord-admin`. Both go
-through the same code, so they cannot drift apart.
+Use `/mesh` anywhere, or type commands in `#meshycord-admin`. Both reach the same
+implementations, so behaviour cannot drift apart — but the typed forms are shorter,
+since a channel you are already in does not need the ceremony. `link` is `add`,
+`sync-rooms` is `sync rooms`, `contact-reset-path` is `contact reset-path`, and
+`help` lists them all.
 
 ```
-/mesh status            radio, Discord, links, traffic
-/mesh list              room servers, companions, channels, links, repeaters
-/mesh find <text>       search by name or key
-/mesh link <target>     give something its own Discord channel
-/mesh unlink <target>   remove a link (the channel is left alone)
-/mesh login             set a room-server password in a private popup
-/mesh tidy              drop links whose channel or mesh slot is gone
-/mesh sync-rooms        link every known room server (asks first)
-/mesh contact-add       add a node from its full public key
-/mesh contact-find      search every contact on the radio
-/mesh contact-remove    delete a contact from the radio
-/mesh reset             delete everything the bridge created (asks first)
+/mesh status              radio, Discord, links, traffic
+/mesh help                list every command
+/mesh list <what>         room servers, companions, channels, links, repeaters, sensors
+/mesh find <text>         search contacts and channels by name or key
+/mesh link <target>       give a mesh source its own Discord channel
+/mesh unlink <target>     remove a link (the channel is left alone)
+/mesh login [target]      set a room-server password in a private popup
+/mesh tidy                drop links whose channel or mesh slot is gone
+/mesh sync-rooms          give every known room server a channel (asks first)
+/mesh reset               delete everything the bridge created (asks first)
 ```
+
+The radio's own contact list is managed separately, because these change the node
+rather than anything in Discord:
+
+```
+/mesh contact-add         add a node from its full 64-character public key
+/mesh contact-find        search every contact, repeaters and sensors included
+/mesh contact-info        everything about one contact, including its full key
+/mesh contact-rename      rename a contact on the radio
+/mesh contact-type        correct what a contact is (room server, companion, …)
+/mesh contact-reset-path  forget a contact's stored route, so the next message floods
+/mesh contact-refresh     re-read the contact list from the radio
+/mesh contact-remove      delete a contact from the radio
+```
+
+`contact-info` is the one that matters more than it sounds: it is where a **full
+public key** comes from, and `contact-remove` needs the full key rather than the
+12-character prefix a message shows.
+
+`list` takes what to list, and optionally `unlinked` to hide what already has a
+channel and `sort` (most recently heard, name, or hops).
+
+`rediscover`, in `#meshycord-admin` or on the Links page, is the repair command:
+it drops every link and forgets the admin channel, the inbox and the categories,
+then finds those three again by name. Use it when the bridge and your server have
+got out of step — a restored database pointed at a server whose channels have
+moved on, say.
+
+**It deletes nothing in Discord, and it does not re-adopt previously linked
+channels either.** Only the admin channel and the categories are matched by name;
+a link is always a freshly created channel. So with auto-create on you can end up
+with a second `#public` beside the first, and the original left orphaned. Delete
+the strays by hand — `tidy` will not, since it drops links whose channel is
+missing rather than channels whose link is.
 
 `list` and `find` **freeze their numbering for ten minutes**, so `add 7` always
 means the row you saw — contacts adverting in afterwards cannot shift it.
@@ -276,9 +338,9 @@ the route you already have.
 A mesh message is **160 bytes** (`MAX_TEXT_LEN` in the firmware). On a group
 channel the node prepends its own name and silently truncates to fit, so the
 usable text there is `160 - len(node_name) - 2` and the bridge splits against
-that smaller budget. Longer text is split into up to three
-transmissions, about two seconds apart, each echoed into Discord as its own
-message and tracked separately — so you can see how much airtime you used and
+that smaller budget. Longer text is split into up to three transmissions, about
+two seconds apart — both numbers are in Settings — each echoed into Discord as its
+own message and tracked separately, so you can see how much airtime you used and
 which pieces actually landed.
 
 Beyond that limit it is **refused, not truncated**, and the refusal says how much
@@ -309,7 +371,12 @@ server's keep-alive interval, so there is no expiry to schedule against.
   add or remove contacts
 - **Activity** — what the bridge has done to your server, so "why does this
   channel exist" has an answer months later
-- **Settings** — everything above
+- **Settings** — the bot token and server, the console account, the transport and
+  its device, BLE name/address/PIN, the auto-create policy, history retention,
+  the room-session window, and the split limits
+
+`/healthz` answers `ok` without a login, for an uptime check or a monitoring
+probe. It is the only unauthenticated page once a password is set.
 
 The console is deliberately not the only way to drive this. It is not reachable
 when you are away from home, and the radio is — which is why the Discord admin
@@ -335,6 +402,18 @@ Command-line flags:
 -list-ports                        list serial devices and exit
 -version
 ```
+
+And four that write a setting and exit, for setting the bridge up without a
+browser — see [Setup](#2-point-it-at-your-server):
+
+```
+-set-token <token>       -set-guild <id>
+-set-password <pass>     -set-serial <device>
+```
+
+**History is kept for 90 days by default**, then pruned; Settings takes any
+number of days, and 0 keeps everything. On an SD card, unbounded history is a
+slow leak rather than a feature.
 
 ### Auto-create policy
 
@@ -386,6 +465,11 @@ bond (`bluetoothctl remove <MAC>`) and let it re-pair.
 are rebuilt on purpose; without an inbox, unrouted messages are silently
 dropped. Ordinary linked channels stay deleted, and their link is dropped with
 them.
+
+**"🔄 worked once and now does nothing."**
+The bridge could not take your reaction off the message, so Discord considers it
+already present and sends no event for the second press. Give the bot **Manage
+Messages**, or remove the 🔄 by hand before adding it again.
 
 **"My node is on the mesh but I cannot message it."**
 It has to be in the radio's contact list. If its adverts do not reach you, add
@@ -475,10 +559,14 @@ matching — against a fake radio that lives in memory.
 Renaming a Discord channel can never break anything. Categories are the one
 exception, matched by name, because Discord offers no other way to find one.
 
-**Nothing is adopted, only created.** The bridge never claims or moves a channel
-it did not make. Matching a channel by name and then moving it is how a
+**Nothing is moved, and almost nothing is adopted.** The bridge never relocates a
+channel it did not create. Matching a channel by name and then moving it is how a
 repurposed `#general` ends up dragged into someone else's category, and a bridge
 that rearranges a server it was invited into has overstepped.
+
+One deliberate exception, besides the categories above: an existing
+`#meshycord-admin` is adopted by name, so recreating one by hand works. It is
+adopted where it already sits rather than moved into the category.
 
 **SD-card longevity is taken seriously.** WAL mode, `synchronous=NORMAL`, writes
 only when something actually changed, and logs to journald rather than a file. A
