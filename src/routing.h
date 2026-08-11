@@ -30,6 +30,13 @@ static const size_t MAX_ROUTES = 24;
 
 void   routes_load();
 void   routes_save();
+
+// Persist a single route. routes_save() rewrites every slot, which is a flash
+// write per route just to record one moved poll cursor — and cursors move as
+// often as every five seconds on a hot channel. Use this when exactly one route
+// changed; `r` must be a pointer from routes_at()/route_find().
+void   route_save_one(const Route* r);
+
 size_t routes_count();
 Route* routes_at(size_t i);
 

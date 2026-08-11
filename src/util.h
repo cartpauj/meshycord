@@ -38,6 +38,11 @@ String utf8_truncate(const String& in, size_t max_bytes);
 void watchdog_begin(uint32_t timeout_s);
 void watchdog_feed();
 
-// Deliberate restart when free heap stays critically low: a controlled reboot
+// Deliberate restart when the heap stays critically low: a controlled reboot
 // beats a random allocation failure somewhere unpredictable.
-void heap_guard_check(uint32_t min_free);
+//
+// Checks the largest free BLOCK as well as the total, because fragmentation is
+// what actually kills these allocations — a 20KB request fails when no single
+// block is that big, however healthy the total looks. `min_block` defaults to
+// half of `min_free`; pass it explicitly to be stricter.
+void heap_guard_check(uint32_t min_free, uint32_t min_block = 0);

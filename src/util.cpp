@@ -147,18 +147,48 @@ void watchdog_feed() {
   esp_task_wdt_reset();
 }
 
-void heap_guard_check(uint32_t min_free) {
-  static int strikes = 0;
-  uint32_t f = ESP.getFreeHeap();
-  if (f < min_free) {
-    strikes++;
-    Serial.printf("[heap] LOW: %u free (< %u), strike %d/3\n", f, min_free, strikes);
-    if (strikes >= 3) {
-      Serial.println("[heap] exhausted - restarting deliberately");
-      delay(200);
-      ESP.restart();
-    }
-  } else if (strikes) {
+// Strikes are spaced in time, not counted per call. loop() runs every ~20ms, so
+// three consecutive readings used to span 60 milliseconds — that is not "stayed
+// low", it is one instant, and a momentary dip during a TLS handshake looked
+// exactly like genuine exhaustion. Three strikes now mean roughly three seconds
+// of sustained trouble.
+static const uint32_t HEAP_STRIKE_INTERVAL_MS = 1000;
+
+void heap_guard_check(uint32_t min_free, uint32_t min_block) {
+  static int      strikes = 0;
+  static uint32_t last_strike = 0;
+
+  if (min_block == 0) min_block = min_free / 2;
+
+  uint32_t now = millis();
+  if (strikes && (now - last_strike) < HEAP_STRIKE_INTERVAL_MS) return;
+
+  uint32_t f       = ESP.getFreeHeap();
+  uint32_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+  // Two different failures. Running out is the obvious one. Fragmentation is
+  // the one that actually happens: the total stays comfortable while the heap
+  // is chopped into pieces too small to satisfy a big request, so a 20KB
+  // allocation fails with 60KB "free". Watching only the total would report
+  // everything as fine right up to the crash.
+  bool low_total = (f < min_free);
+  bool low_block = (largest < min_block);
+  if (!low_total && !low_block) {
+    if (strikes) Serial.printf("[heap] recovered: free=%u largest=%u\n", f, largest);
     strikes = 0;
+    return;
+  }
+
+  strikes++;
+  last_strike = now;
+  Serial.printf("[heap] LOW (%s): free=%u (min %u) largest=%u (min %u), "
+                "strike %d/3\n",
+                low_total && low_block ? "exhausted+fragmented"
+                                       : (low_total ? "exhausted" : "fragmented"),
+                f, min_free, largest, min_block, strikes);
+  if (strikes >= 3) {
+    Serial.println("[heap] sustained - restarting deliberately");
+    delay(200);
+    ESP.restart();
   }
 }

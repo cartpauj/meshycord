@@ -633,22 +633,35 @@ static void poll_discord_once() {
   }
   if (do_fast) g_last_fast_poll = now;
 
-  bool dirty = false;
   int checked = 0, hot_checked = 0;
-  for (size_t i = 0; i < routes_count(); i++) {
+  for (size_t i = 0; i < routes_count(); ) {
     Route* r = routes_at(i);
     if (!r) break;
     bool hot = (int32_t)(r->hot_until - now) > 0;
     // Every channel on every slow tick; hot ones also on fast ticks.
-    if (!(do_slow || (hot && do_fast))) continue;
+    if (!(do_slow || (hot && do_fast))) { i++; continue; }
     watchdog_feed();
+
+    size_t before = routes_count();
     String rc = r->last_discord_id;
     poll_channel(r->channel_id, rc, r);
-    if (rc != r->last_discord_id) { r->last_discord_id = rc; dirty = true; }
+
+    // poll_channel drops the route when Discord reports the channel deleted,
+    // and that compacts the table underneath us: `r` now points at a DIFFERENT
+    // route, so writing the cursor through it would corrupt that route's
+    // bookmark, and i++ would skip the entry that just slid into this slot.
+    if (routes_count() < before) continue;      // same index, next route
+
+    if (rc != r->last_discord_id) {
+      r->last_discord_id = rc;
+      // One slot, not the whole table: this fires as often as every five
+      // seconds on a hot channel.
+      route_save_one(r);
+    }
     checked++;
     if (hot) hot_checked++;
+    i++;
   }
-  if (dirty) routes_save();
 
   discord_session_end();
 

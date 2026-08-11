@@ -48,6 +48,17 @@ bool route_remove(RouteKind kind, const String& key) {
   return false;
 }
 
+// Every NVS write is checked. Preferences returns 0 on failure and says nothing
+// else, so an unchecked write means a full or worn-out NVS silently stops
+// persisting: routes and settings look saved, behave saved, and are gone at the
+// next boot. Loud beats mysterious.
+static bool put_checked(Preferences& p, const char* key, const String& value) {
+  if (p.putString(key, value) == value.length()) return true;
+  Serial.printf("[route] NVS WRITE FAILED for '%s' (%u bytes) - links will not "
+                "survive a reboot\n", key, (unsigned)value.length());
+  return false;
+}
+
 static String g_inbox_cursor;
 static bool   g_inbox_cursor_loaded = false;
 
@@ -67,8 +78,11 @@ void inbox_cursor_set(const String& id) {
   g_inbox_cursor = id;
   g_inbox_cursor_loaded = true;
   Preferences p;
-  p.begin(NS, false);
-  p.putString("inbox_cur", id);
+  if (!p.begin(NS, false)) {
+    Serial.println("[route] NVS open failed; inbox cursor not saved");
+    return;
+  }
+  put_checked(p, "inbox_cur", id);
   p.end();
 }
 
@@ -78,18 +92,50 @@ void routes_clear() {
 }
 
 // Stored as one packed string per slot: kind|key|channel_id|label|last_discord_id
+static String route_encode(const Route& r) {
+  return String((int)r.kind) + "|" + r.key + "|" + r.channel_id + "|" +
+         r.label + "|" + r.last_discord_id;
+}
+
+static void slot_key(size_t i, char* out, size_t n) {
+  snprintf(out, n, "r%u", (unsigned)i);
+}
+
 void routes_save() {
   Preferences p;
-  p.begin(NS, false);
+  if (!p.begin(NS, false)) {
+    Serial.println("[route] NVS open failed; not saved");
+    return;
+  }
   p.putUInt("n", g_count);
   for (size_t i = 0; i < g_count; i++) {
     char k[8];
-    snprintf(k, sizeof(k), "r%u", (unsigned)i);
-    String v = String((int)g_routes[i].kind) + "|" + g_routes[i].key + "|" +
-               g_routes[i].channel_id + "|" + g_routes[i].label + "|" +
-               g_routes[i].last_discord_id;
-    p.putString(k, v);
+    slot_key(i, k, sizeof(k));
+    put_checked(p, k, route_encode(g_routes[i]));
   }
+  p.end();
+}
+
+// Persist ONE route, for the common case of a poll cursor moving.
+//
+// routes_save() rewrites the whole table, so saving a single changed Discord
+// message id cost a flash write per route. Hot channels are polled every five
+// seconds, which made that up to a dozen full-table rewrites a minute while a
+// conversation was in progress — on a 20KB NVS partition shared with the bot
+// token. This writes the one slot that actually changed.
+void route_save_one(const Route* r) {
+  if (!r) return;
+  size_t idx = (size_t)(r - g_routes);
+  if (idx >= g_count) { routes_save(); return; }   // not one of ours; be safe
+
+  Preferences p;
+  if (!p.begin(NS, false)) {
+    Serial.println("[route] NVS open failed; not saved");
+    return;
+  }
+  char k[8];
+  slot_key(idx, k, sizeof(k));
+  put_checked(p, k, route_encode(*r));
   p.end();
 }
 

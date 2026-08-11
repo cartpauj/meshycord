@@ -108,6 +108,89 @@ static int http_request(const char* method, const String& path,
   return code;
 }
 
+// Parse a JSON response straight off the socket, keeping only the fields the
+// filter names.
+//
+// GET /guilds/{id}/channels returns EVERY channel with its full permission
+// overwrite list, which is the bulk of it — tens of KB on a large server.
+// Reading that into a String and then parsing it needs the body in memory
+// twice over, which is more heap than a C3 has. Filtering as it streams keeps
+// the peak at a few hundred bytes no matter how big the server is.
+//
+// HTTP/1.0 is deliberate and load-bearing: it stops the server using chunked
+// transfer encoding, which getStream() does NOT decode — feeding a chunked body
+// to the parser would hand it the chunk-length lines as if they were JSON. The
+// cost is that the connection closes afterwards, which is fine here: this path
+// only runs during bootstrap, rediscover and reset, never in the polling sweep.
+static int http_get_json(const String& path, JsonDocument& doc,
+                         const JsonDocument& filter) {
+  // Never run this on the pooled connection: HTTP/1.0 would close it underneath
+  // the rest of the sweep. Opening a second TLS session alongside it would mean
+  // two mbedTLS contexts at once, so stand the pooled one down for the duration.
+  const bool had_session = (g_session != nullptr);
+  if (had_session) discord_session_end();
+
+  int code;
+  {
+    WiFiClientSecure client;
+    client.setCACert(DISCORD_ROOT_CAS);
+    client.setTimeout(15);
+    client.setHandshakeTimeout(20);
+
+    HTTPClient http;
+    if (!http.begin(client, String("https://") + API_HOST + path)) {
+      Serial.println("[discord] http.begin failed");
+      if (had_session) discord_session_begin();
+      return -1000;
+    }
+    http.addHeader("Authorization", String("Bot ") + g_settings.bot_token);
+    http.addHeader("User-Agent", "MeshyCord (esp32c3, 1.0)");
+    http.setTimeout(15000);
+    http.useHTTP10(true);           // identity encoding, so the stream is JSON
+
+    code = http.GET();
+
+    if (code >= 200 && code < 300) {
+      DeserializationError err = deserializeJson(
+          doc, http.getStream(), DeserializationOption::Filter(filter));
+      if (err) {
+        Serial.printf("[discord] json stream parse: %s\n", err.c_str());
+        code = -1001;
+      } else {
+        g_auth_failed = false;
+      }
+    } else if (code == 429) {
+      // No retry_after to read: the body was not parsed. Back off a flat second,
+      // which is the floor the rate-limit path uses anyway.
+      Serial.println("[discord] 429 rate limited on channel listing");
+      uint32_t until = millis() + 1000;
+      while ((int32_t)(until - millis()) > 0) { watchdog_feed(); delay(50); }
+    } else if (code == 401 || code == 403) {
+      if (!g_auth_failed)
+        Serial.println("[discord] AUTH FAILED (401/403) - check the bot token and "
+                       "that the bot is still in the server");
+      g_auth_failed = true;
+    } else {
+      Serial.printf("[discord] GET %s -> %d\n", path.c_str(), code);
+    }
+
+    http.end();
+    client.stop();
+  }
+
+  if (had_session) discord_session_begin();
+  return code;
+}
+
+// Keep only id/name/type from each element of a channel listing. Everything
+// else — permission overwrites above all — is discarded as it arrives.
+static void channel_list_filter(JsonDocument& filter) {
+  JsonObject f = filter.add<JsonObject>();
+  f["id"]   = true;
+  f["name"] = true;
+  f["type"] = true;
+}
+
 String discord_send_id(const String& channel_id, const String& content) {
   if (channel_id.length() == 0) return "";
   String body = String("{\"content\":\"") + json_escape(content) + "\"}";
@@ -246,13 +329,13 @@ String discord_find_channel(const String& name) {
   if (g_settings.guild_id.length() == 0) return "";
   String want = discord_sanitize_name(name);
 
-  String resp;
-  int code = http_request("GET", String(API_BASE) + "/guilds/" +
-                          g_settings.guild_id + "/channels", "", &resp);
+  JsonDocument filter;
+  channel_list_filter(filter);
+  JsonDocument doc;
+  int code = http_get_json(String(API_BASE) + "/guilds/" +
+                           g_settings.guild_id + "/channels", doc, filter);
   if (code < 200 || code >= 300) return "";
 
-  JsonDocument doc;
-  if (deserializeJson(doc, resp)) return "";
   for (JsonObject ch : doc.as<JsonArray>()) {
     if ((int)(ch["type"] | -1) != 0) continue;          // text channels only
     if (want == ch["name"].as<String>()) return ch["id"].as<String>();
@@ -269,12 +352,13 @@ String discord_find_or_create_channel(const String& name, const String& topic) {
 String discord_find_or_create_category(const String& name) {
   if (g_settings.guild_id.length() == 0) return "";
 
-  String resp;
-  int code = http_request("GET", String(API_BASE) + "/guilds/" +
-                          g_settings.guild_id + "/channels", "", &resp);
-  if (code >= 200 && code < 300) {
+  {
+    JsonDocument filter;
+    channel_list_filter(filter);
     JsonDocument doc;
-    if (!deserializeJson(doc, resp)) {
+    int found = http_get_json(String(API_BASE) + "/guilds/" +
+                              g_settings.guild_id + "/channels", doc, filter);
+    if (found >= 200 && found < 300) {
       for (JsonObject ch : doc.as<JsonArray>()) {
         if ((int)(ch["type"] | -1) != 4) continue;      // 4 == category
         if (ch["name"].as<String>() == name) return ch["id"].as<String>();
@@ -285,8 +369,8 @@ String discord_find_or_create_category(const String& name) {
   // Categories keep their given name verbatim — no slug sanitising.
   String body = String("{\"name\":\"") + json_escape(name) + "\",\"type\":4}";
   String cresp;
-  code = http_request("POST", String(API_BASE) + "/guilds/" +
-                      g_settings.guild_id + "/channels", body, &cresp);
+  int code = http_request("POST", String(API_BASE) + "/guilds/" +
+                          g_settings.guild_id + "/channels", body, &cresp);
   if (code < 200 || code >= 300) return "";
   JsonDocument doc2;
   if (deserializeJson(doc2, cresp)) return "";

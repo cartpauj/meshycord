@@ -24,7 +24,23 @@ static SnapItem g_snap[SNAPSHOT_MAX];
 static size_t   g_snap_n  = 0;
 static uint32_t g_snap_at = 0;
 
-static void snap_reset() { g_snap_n = 0; g_snap_at = millis(); }
+// Assigning a null const char* is the only public way to make an Arduino String
+// release its heap buffer: it routes to String::invalidate(). Assigning "" keeps
+// the buffer (copy() only reserves, never shrinks), and so does move-assigning an
+// empty String, because move() reuses the destination buffer when it is big
+// enough. Strings of 14 characters or fewer are stored inline and own nothing.
+static void string_release(String& s) { s = (const char*)nullptr; }
+
+static void snap_reset() {
+  // Hand back the previous listing's strings rather than leaving them parked
+  // until some later listing happens to overwrite that slot.
+  for (size_t i = 0; i < g_snap_n; i++) {
+    string_release(g_snap[i].key);
+    string_release(g_snap[i].label);
+  }
+  g_snap_n = 0;
+  g_snap_at = millis();
+}
 static void snap_add(RouteKind k, const String& key, const String& label) {
   if (g_snap_n >= SNAPSHOT_MAX) return;
   g_snap[g_snap_n].kind  = k;
@@ -549,6 +565,15 @@ void admin_handle(const String& raw) {
   if (n == 0) { reply("Nothing matched."); return; }
   if (!channels && !links_only) sort_rows(rows, n, sk, desc);
   render(rows, n, title);
+
+  // `rows` is static, so its Strings would hold their heap buffers until some
+  // later listing overwrote that slot — a listing of a few hundred contacts
+  // parked the lot for the rest of the uptime. render() has already copied what
+  // `add <n>` needs into the snapshot, so these are dead the moment it returns.
+  for (size_t i = 0; i < n; i++) {
+    string_release(rows[i].key);
+    string_release(rows[i].label);
+  }
 }
 
 bool admin_is_admin_channel(const String& channel_id) {

@@ -349,9 +349,13 @@ something not in the contact list cannot be classified as a person or a room,
 and there is nothing to name a channel after, so it always goes to the inbox
 regardless of these settings.
 
-The page also lists contacts and channels with search boxes and buttons to
-create a Discord channel for any of them. The admin console does the same thing
-and works from anywhere, so the web page is mostly for first-time setup.
+It also shows how many links exist, and has buttons to clear them all or re-run
+the Discord setup.
+
+Linking is done from `#meshycord-admin`, not here — it works from anywhere and
+reads better. The page is deliberately a fixed size whatever the mesh is doing:
+its cost does not grow with the number of contacts, so opening it on a busy mesh
+is never the thing that runs the device out of memory.
 
 ## Design notes
 
@@ -427,6 +431,22 @@ pio run -t upload        # flash over USB
 pio device monitor       # serial log at 115200
 ```
 
+The platform is pinned to `espressif32@7.0.1` (Arduino core 2.0.17), and that
+pin matters. `platform = espressif32` on its own resolves to whatever is
+installed under that name, and the pioarduino/tasmota fork ships under the same
+name with Arduino core 3.x. On core 3.x `WiFiClientSecure.h` no longer exists —
+it was renamed `NetworkClientSecure.h` — and NimBLE-Arduino 1.4.3 does not
+compile at all. The result is errors in `discord.cpp` and deep inside NimBLE
+that look like the project is broken when only the framework is wrong.
+
+If you see `fatal error: WiFiClientSecure.h: No such file or directory`, that is
+what happened. Check which platform actually got used:
+
+```sh
+pio system info          # confirm the core directory
+pio pkg list             # confirm espressif32 7.0.1, not a 202x.xx.xx fork
+```
+
 The ESP32-C3 needs specific flash settings, already in `platformio.ini`:
 
 ```ini
@@ -489,6 +509,52 @@ truncated messages that passed the check.
 **NVS namespaces are `meshy` and `meshy_rt`.** Renaming them orphans every
 deployed device's settings.
 
+**Nothing may build a response proportional to the contact list.** The C3 has no
+PSRAM, and a single contiguous allocation of a few tens of KB is already most of
+the free heap once WiFi, TLS and NimBLE are up. Anything that renders per-contact
+or per-channel output has to be bounded, streamed, or paged. This is the
+constraint the web UI is shaped around.
+
+**`GET /guilds/{id}/channels` is parsed off the socket, not into a String.** The
+response carries every channel with its full permission overwrites, which is tens
+of KB on a large server — holding it and then parsing it needs the body in memory
+twice. `http_get_json()` streams it through an ArduinoJson filter that keeps only
+`id`, `name` and `type`.
+
+**That path forces HTTP/1.0, and it is load-bearing.** `useHTTP10(true)` is what
+stops the server replying with chunked transfer encoding, which `getStream()`
+does not decode — the parser would be handed chunk-length lines as if they were
+JSON. It costs connection reuse, which is why this only runs during bootstrap,
+rediscover and reset, never in the polling sweep.
+
+**Free heap alone does not predict an allocation failure.** Fragmentation does:
+a request fails because no single block is big enough while the total still looks
+healthy. `heap_guard_check()` watches the largest free block as well, and spaces
+its strikes over seconds — `loop()` runs every 20ms, so counting three
+consecutive calls measured 60 milliseconds, not a sustained condition.
+
+**Persist one route, not the table.** `routes_save()` rewrites every slot, so
+recording a single moved poll cursor cost a flash write per route — and hot
+channels poll every five seconds. `route_save_one()` exists for that case. NVS is
+20KB and shared with the bot token.
+
+**Every NVS write is checked.** `Preferences` reports failure by returning 0 and
+nothing else. Unchecked, a full or worn-out NVS lets settings appear to save,
+keep working for the rest of the session because they are held in RAM, and simply
+vanish at the next boot.
+
+**Dropping a route compacts the table.** Any loop holding a `Route*` across a
+call that can remove one is holding a pointer to a different route afterwards,
+and must not advance its index. `poll_discord_once()` and `admin_bootstrap()`
+both handle this; the failure is silent, and corrupts another channel's poll
+cursor rather than crashing.
+
+**An Arduino String releases its buffer only when assigned a null `const char*`.**
+Assigning `""` keeps it, and so does move-assigning an empty String. Strings of
+14 characters or fewer are stored inline and own no heap at all. This matters for
+the static scratch arrays in `admin.cpp`, which would otherwise hold a listing's
+worth of names until something overwrote them.
+
 ### Serial log
 
 The device narrates what it does. Useful markers:
@@ -498,8 +564,16 @@ The device narrates what it does. Useful markers:
 [mesh] contacts: 350 seen, 253 skipped   contact enumeration
 [poll] full sweep: 2 channel(s) in ...   Discord polling, watch as links grow
 [ack] delivered in 2410ms                delivery confirmation
-[heap] ...                               free heap, watch the floor
+[heap] free=..  largest=..  floor=..     watch largest, not just free
 [wdt] watchdog armed, 90s timeout
+```
+
+Three worth reacting to:
+
+```
+[heap] LOW (fragmented): ...             free heap is fine, no usable block
+[route] NVS WRITE FAILED for 'r3'        links will not survive a reboot
+[discord] json stream parse: ...         the channel listing did not parse
 ```
 
 ## Credits

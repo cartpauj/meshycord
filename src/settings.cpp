@@ -37,26 +37,44 @@ void settings_load() {
     Serial.println("[cfg] WARNING: web UI has no password set");
 }
 
+// Preferences reports a failed write by returning 0 and nothing else. Unchecked,
+// a full or worn-out NVS means settings appear to save, keep working for the
+// rest of the session because they are held in RAM, and are simply gone at the
+// next boot — including the bot token, which sends the device back to setup mode
+// with no explanation.
+static bool put_str(Preferences& p, const char* key, const String& v, bool& ok) {
+  if (p.putString(key, v) == v.length()) return true;
+  Serial.printf("[cfg] NVS WRITE FAILED for '%s'\n", key);
+  ok = false;
+  return false;
+}
+
 void settings_save() {
   Preferences p;
-  p.begin(NS, /*readOnly=*/false);
-  p.putString("wifi_ssid", g_settings.wifi_ssid);
-  p.putString("wifi_pass", g_settings.wifi_pass);
-  p.putString("bot_token", g_settings.bot_token);
-  p.putString("guild_id",  g_settings.guild_id);
-  p.putString("inbox",     g_settings.inbox_channel);
-  p.putString("admin",     g_settings.admin_channel);
-  p.putUInt  ("poll_ms",   g_settings.poll_interval_ms);
-  p.putString("ui_user",   g_settings.ui_user);
-  p.putString("ui_pass",   g_settings.ui_pass);
-  p.putString("ble_name",  g_settings.ble_name);
-  p.putString("ble_addr",  g_settings.ble_addr);
-  p.putString("ble_pin",   g_settings.ble_pin);
-  p.putBool  ("ac_chan",    g_settings.autocreate_channels);
-  p.putBool  ("ac_room",    g_settings.autocreate_rooms);
-  p.putBool  ("ac_dm",      g_settings.autocreate_dms);
+  if (!p.begin(NS, /*readOnly=*/false)) {
+    Serial.println("[cfg] NVS open FAILED - settings not saved");
+    return;
+  }
+  bool ok = true;
+  put_str(p, "wifi_ssid", g_settings.wifi_ssid, ok);
+  put_str(p, "wifi_pass", g_settings.wifi_pass, ok);
+  put_str(p, "bot_token", g_settings.bot_token, ok);
+  put_str(p, "guild_id",  g_settings.guild_id,  ok);
+  put_str(p, "inbox",     g_settings.inbox_channel, ok);
+  put_str(p, "admin",     g_settings.admin_channel, ok);
+  p.putUInt("poll_ms",    g_settings.poll_interval_ms);
+  put_str(p, "ui_user",   g_settings.ui_user, ok);
+  put_str(p, "ui_pass",   g_settings.ui_pass, ok);
+  put_str(p, "ble_name",  g_settings.ble_name, ok);
+  put_str(p, "ble_addr",  g_settings.ble_addr, ok);
+  put_str(p, "ble_pin",   g_settings.ble_pin,  ok);
+  p.putBool("ac_chan",    g_settings.autocreate_channels);
+  p.putBool("ac_room",    g_settings.autocreate_rooms);
+  p.putBool("ac_dm",      g_settings.autocreate_dms);
   p.end();
-  Serial.println("[cfg] saved");
+  Serial.println(ok ? "[cfg] saved"
+                    : "[cfg] SAVED WITH ERRORS - some settings will not survive "
+                      "a reboot (NVS full or worn out)");
 }
 
 void settings_factory_reset() {
