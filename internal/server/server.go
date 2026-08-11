@@ -184,11 +184,13 @@ const (
 	cookieMaxAge = 30 * 24 * time.Hour
 )
 
-// authOptional reports whether the console is running with no password.
+// authOptional reports whether the console will serve a page without a login.
 //
-// On a fresh install there is none, because there is no safe default: a
-// hardcoded password is worse than none, since it looks secure and is not.
-// Every page shows a loud banner until one is set.
+// It will not. A fresh install accepts config.DefaultUsername and
+// DefaultPassword, so the console asks for credentials from the first request
+// instead of handing the bot token to anyone who can reach the port. Those
+// credentials are published, so every page keeps warning until the password is
+// changed — see IsDefaultPassword.
 func (s *Server) authOptional() bool { return !s.cfg.HasPassword() }
 
 func (s *Server) requireLogin(next http.Handler) http.Handler {

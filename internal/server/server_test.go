@@ -118,19 +118,51 @@ func seed(t *testing.T, db *store.Store) {
 	db.LogEvent("error", "discord", "setup failed: no server id")
 }
 
-func get(t *testing.T, h http.Handler, path string) (int, string) {
+// get fetches a page. With no cookie it is an anonymous request, which since
+// the console gained a default password means a redirect to /login — so most
+// callers pass the one from session().
+func get(t *testing.T, h http.Handler, path string, jar ...*http.Cookie) (int, string) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	for _, c := range jar {
+		req.AddCookie(c)
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	body, _ := io.ReadAll(rec.Result().Body)
 	return rec.Code, string(body)
 }
 
+// session logs in through the real handler and returns the session cookie, so
+// every page test also exercises the login path rather than a forged cookie.
+func session(t *testing.T, srv *Server, user, pass string) *http.Cookie {
+	t.Helper()
+	form := url.Values{"username": {user}, "password": {pass}}
+	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	for _, c := range rec.Result().Cookies() {
+		if c.Value != "" {
+			return c
+		}
+	}
+	t.Fatalf("login as %q did not set a session cookie (status %d)", user, rec.Code)
+	return nil
+}
+
+// defaultSession logs in with the shipped credentials.
+func defaultSession(t *testing.T, srv *Server) *http.Cookie {
+	t.Helper()
+	return session(t, srv, config.DefaultUsername, config.DefaultPassword)
+}
+
 func TestEveryPageRendersWithData(t *testing.T) {
 	srv, db, _ := newTestServer(t)
 	seed(t, db)
 	h := srv.Handler()
+	ck := defaultSession(t, srv)
 
 	for _, tc := range []struct {
 		path     string
@@ -152,7 +184,7 @@ func TestEveryPageRendersWithData(t *testing.T) {
 		{"/login", []string{"Sign in"}},
 		{"/healthz", []string{"ok"}},
 	} {
-		code, body := get(t, h, tc.path)
+		code, body := get(t, h, tc.path, ck)
 		if code != http.StatusOK {
 			t.Errorf("GET %s = %d", tc.path, code)
 			continue
@@ -176,8 +208,9 @@ func TestMessageFiltersAndPaging(t *testing.T) {
 	srv, db, _ := newTestServer(t)
 	seed(t, db)
 	h := srv.Handler()
+	ck := defaultSession(t, srv)
 
-	code, body := get(t, h, "/messages?kind=room")
+	code, body := get(t, h, "/messages?kind=room", ck)
 	if code != http.StatusOK {
 		t.Fatalf("status %d", code)
 	}
@@ -188,7 +221,7 @@ func TestMessageFiltersAndPaging(t *testing.T) {
 		t.Error("room filter let a channel message through")
 	}
 
-	_, body = get(t, h, "/messages?q=never")
+	_, body = get(t, h, "/messages?q=never", ck)
 	if !strings.Contains(body, "never arrived") {
 		t.Error("search did not find a message by body text")
 	}
@@ -197,7 +230,7 @@ func TestMessageFiltersAndPaging(t *testing.T) {
 	}
 
 	// An unknown kind must be ignored rather than returning nothing.
-	_, body = get(t, h, "/messages?kind=nonsense")
+	_, body = get(t, h, "/messages?kind=nonsense", ck)
 	if !strings.Contains(body, "on my way") {
 		t.Error("an invalid kind filter hid everything")
 	}
@@ -207,8 +240,9 @@ func TestContactFilters(t *testing.T) {
 	srv, db, _ := newTestServer(t)
 	seed(t, db)
 	h := srv.Handler()
+	ck := defaultSession(t, srv)
 
-	_, body := get(t, h, "/contacts?type=2")
+	_, body := get(t, h, "/contacts?type=2", ck)
 	if !strings.Contains(body, "Hilltop") {
 		t.Error("repeater filter dropped the repeater")
 	}
@@ -216,7 +250,7 @@ func TestContactFilters(t *testing.T) {
 		t.Error("repeater filter let a companion through")
 	}
 
-	_, body = get(t, h, "/contacts?q=alice")
+	_, body = get(t, h, "/contacts?q=alice", ck)
 	if !strings.Contains(body, "Alice") {
 		t.Error("name search failed")
 	}
@@ -226,6 +260,7 @@ func TestContactFilters(t *testing.T) {
 func TestBotTokenIsNeverRendered(t *testing.T) {
 	srv, db, cfg := newTestServer(t)
 	seed(t, db)
+	ck := defaultSession(t, srv)
 	const token = "fake-bot-token-not-a-real-credential"
 	if err := cfg.SetBotToken(token); err != nil {
 		t.Fatal(err)
@@ -233,38 +268,66 @@ func TestBotTokenIsNeverRendered(t *testing.T) {
 	h := srv.Handler()
 
 	for _, path := range []string{"/", "/settings", "/links", "/contacts", "/messages", "/logs"} {
-		_, body := get(t, h, path)
+		_, body := get(t, h, path, ck)
 		if strings.Contains(body, token) {
 			t.Errorf("GET %s leaked the bot token", path)
 		}
 	}
 	// The room password must not leak either.
-	_, body := get(t, h, "/links")
+	_, body := get(t, h, "/links", ck)
 	if strings.Contains(body, "fake-test-password") {
 		t.Error("/links leaked a stored room password")
 	}
 }
 
-func TestAuthIsOptionalUntilAPasswordIsSet(t *testing.T) {
+// The console ships with a default password, so it asks for a login from the
+// first request rather than serving the bot token to whoever reaches the port.
+//
+// The banner is the part that matters. admin/admin is published, so a default
+// that quietly looked like a configured password would be worse than no password
+// at all — nobody fixes what nothing complains about.
+func TestDefaultPasswordStillWarnsUntilChanged(t *testing.T) {
 	srv, db, cfg := newTestServer(t)
 	seed(t, db)
 	h := srv.Handler()
 
-	// Fresh install: reachable, with a banner saying why that is a problem.
-	code, body := get(t, h, "/links")
-	if code != http.StatusOK {
-		t.Fatalf("a fresh install should be reachable, got %d", code)
-	}
-	if !strings.Contains(body, "no password") {
-		t.Error("the missing-password banner is not shown")
+	// Anonymous requests do not get in, even on a fresh install.
+	if code, _ := get(t, h, "/links"); code != http.StatusFound {
+		t.Errorf("an anonymous request got %d, want a redirect to /login", code)
 	}
 
+	ck := defaultSession(t, srv)
+	code, body := get(t, h, "/links", ck)
+	if code != http.StatusOK {
+		t.Fatalf("the default credentials did not work: got %d", code)
+	}
+	if !strings.Contains(body, "default password") {
+		t.Error("no warning that the default password is still in use")
+	}
+
+	// A wrong password must still be refused.
+	if cfg.CheckPassword("not-the-default") {
+		t.Error("any password was accepted")
+	}
+
+	// Changing it silences the banner and invalidates the old session.
 	if err := cfg.SetPassword("fake-console-password"); err != nil {
 		t.Fatal(err)
 	}
-	code, _ = get(t, h, "/links")
-	if code != http.StatusFound {
-		t.Errorf("with a password set, an anonymous request got %d, want a redirect", code)
+	if cfg.IsDefaultPassword() {
+		t.Error("still reported as the default after being changed")
+	}
+	if cfg.CheckPassword(config.DefaultPassword) {
+		t.Error("the default password still works after being changed")
+	}
+	if code, _ := get(t, h, "/links", ck); code != http.StatusFound {
+		t.Error("the session from before the password change still works")
+	}
+
+	ck2 := session(t, srv, config.DefaultUsername, "fake-console-password")
+	_, body = get(t, h, "/links", ck2)
+	if strings.Contains(body, "default password") {
+		t.Error("the warning survived the password being changed")
 	}
 }
 
@@ -273,9 +336,15 @@ func TestPostsRequireACSRFToken(t *testing.T) {
 	seed(t, db)
 	h := srv.Handler()
 
+	ck := defaultSession(t, srv)
+
+	// Logged in on purpose: without a session these would redirect to /login and
+	// the CSRF check would never be reached, so the test would pass for the
+	// wrong reason.
 	post := func(path string, form url.Values) int {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(ck)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		return rec.Code
@@ -294,6 +363,7 @@ func TestPostsRequireACSRFToken(t *testing.T) {
 
 	// A GET on a POST-only route must not act.
 	req := httptest.NewRequest(http.MethodGet, "/settings/reset", nil)
+	req.AddCookie(ck)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -306,8 +376,11 @@ func TestUnlinkThroughTheConsole(t *testing.T) {
 	seed(t, db)
 	h := srv.Handler()
 
+	ck := defaultSession(t, srv)
+
 	// Take a real token off a rendered page, exactly as a browser would.
 	req := httptest.NewRequest(http.MethodGet, "/links", nil)
+	req.AddCookie(ck)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	body, _ := io.ReadAll(rec.Result().Body)
@@ -319,6 +392,7 @@ func TestUnlinkThroughTheConsole(t *testing.T) {
 	form := url.Values{"csrf": {token}, "kind": {"room"}, "key": {"aabbccddeeff"}}
 	req = httptest.NewRequest(http.MethodPost, "/links/unlink", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(ck)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusSeeOther {
@@ -358,6 +432,7 @@ func discardLogger() *slog.Logger {
 // unlinked in the nav.
 func TestHiddenSectionsAreNotRouted(t *testing.T) {
 	srv, db, _ := newTestServer(t)
+	ck := defaultSession(t, srv)
 	ShowLinks, ShowMessages, ShowContacts = false, false, false
 	seed(t, db)
 	h := srv.Handler()
@@ -367,14 +442,14 @@ func TestHiddenSectionsAreNotRouted(t *testing.T) {
 		"/messages",
 		"/contacts", "/contacts/add", "/contacts/remove", "/contacts/refresh",
 	} {
-		if code, _ := get(t, h, path); code != http.StatusNotFound {
+		if code, _ := get(t, h, path, ck); code != http.StatusNotFound {
 			t.Errorf("GET %s = %d, want 404 while the section is switched off", path, code)
 		}
 	}
 
 	// What remains must still work, and must not advertise what is gone.
 	for _, path := range []string{"/", "/logs", "/settings"} {
-		code, body := get(t, h, path)
+		code, body := get(t, h, path, ck)
 		if code != http.StatusOK {
 			t.Errorf("GET %s = %d", path, code)
 			continue

@@ -8,6 +8,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"strings"
@@ -319,7 +320,7 @@ func (c *Store) Username() string {
 	if u := c.db.Get(KeyWebUser, ""); u != "" {
 		return u
 	}
-	return "admin"
+	return DefaultUsername
 }
 
 // SetUsername renames the account.
@@ -335,12 +336,32 @@ func (c *Store) SetUsername(v string) error {
 	return c.bumpPasswordGeneration()
 }
 
-// HasPassword reports whether a web password has been set.
+// DefaultUsername and DefaultPassword are the credentials a fresh install
+// accepts, so the console asks for a login from the very first request rather
+// than serving the bot token to anyone who can reach the port.
 //
-// It has NOT been, on a fresh install. The console is then reachable by anyone
-// on the network and it holds the bot token, so the UI says so loudly rather
-// than quietly defaulting to something guessable.
-func (c *Store) HasPassword() bool { return c.db.Get(KeyWebPassHash, "") != "" }
+// They are public knowledge — they are in this file — so they are a lock on the
+// door, not security. IsDefaultPassword is what the UI uses to keep saying so
+// until the password is actually changed.
+const (
+	DefaultUsername = "admin"
+	DefaultPassword = "admin"
+)
+
+// HasPassword reports whether the console requires a login. It always does:
+// with nothing stored, DefaultPassword is accepted.
+//
+// Kept as a method rather than folded away because it is what the auth
+// middleware asks, and a future setting that genuinely disables auth would
+// answer here.
+func (c *Store) HasPassword() bool { return true }
+
+// IsDefaultPassword reports that the stored password is still the shipped one.
+//
+// The console warns on every page while this is true. A default that silently
+// looks like a configured password is worse than no password at all: nobody
+// fixes what nothing is complaining about.
+func (c *Store) IsDefaultPassword() bool { return c.db.Get(KeyWebPassHash, "") == "" }
 
 // SetPassword hashes and stores a new password.
 func (c *Store) SetPassword(pw string) error {
@@ -360,11 +381,16 @@ func (c *Store) SetPassword(pw string) error {
 	return c.bumpPasswordGeneration()
 }
 
-// CheckPassword verifies a password against the stored hash.
+// CheckPassword verifies a password against the stored hash, or against
+// DefaultPassword when nothing has been stored yet.
+//
+// The default is compared with subtle.ConstantTimeCompare rather than ==, for
+// the same reason bcrypt takes its time: a comparison that returns early leaks
+// how much of the guess was right.
 func (c *Store) CheckPassword(pw string) bool {
 	h := c.db.Get(KeyWebPassHash, "")
 	if h == "" {
-		return false
+		return subtle.ConstantTimeCompare([]byte(pw), []byte(DefaultPassword)) == 1
 	}
 	return bcrypt.CompareHashAndPassword([]byte(h), []byte(pw)) == nil
 }

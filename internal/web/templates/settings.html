@@ -127,7 +127,7 @@
 
   <label for="password">Password</label>
   <input type="password" id="password" name="password" autocomplete="new-password"
-         placeholder="{{if .HasPassword}}unchanged{{else}}STRONGLY recommended{{end}}">
+         placeholder="{{if .DefaultPassword}}currently admin — change this{{else}}unchanged{{end}}">
   <small>This page holds your bot token and every room password. At least 8 characters.
     Changing it signs out every other session.</small>
 </div>

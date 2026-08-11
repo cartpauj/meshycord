@@ -215,8 +215,9 @@ if command -v systemctl >/dev/null 2>&1 &&
 	port="$(systemctl show -p ExecStart --value meshycord 2>/dev/null |
 		sed -n 's/.*-listen[= ]*[^ ]*:\([0-9]\{1,5\}\).*/\1/p' | head -n 1)"
 	say "Console  : http://$(hostname -I 2>/dev/null | awk '{print $1}'):${port:-9150}"
+	say "Sign in  : admin / admin  <- change this first, it is the same on every install"
 	say ''
-	say 'Open it to set the Discord bot token, your server id, and a console password.'
+	say 'Then set the Discord bot token and your server id on the Settings page.'
 else
 	say ''
 	say 'The service is not running yet. Check: journalctl -u meshycord -n 30'

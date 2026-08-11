@@ -32,10 +32,11 @@
 <main>
 {{/* Problems the operator can actually act on, shown on every page. Each of
      these means messages are not moving, and each names its own fix. */}}
-{{if not .HasPassword}}
+{{if .DefaultPassword}}
 <div class="banner bad">
-  <strong>This console has no password.</strong> Anyone who can reach this machine can read your
-  message history and your bot token. <a href="/settings#account">Set one now</a>.
+  <strong>This console still uses the default password.</strong> <code>admin</code> /
+  <code>admin</code> is published in the README, so anyone who can reach this machine can read your
+  message history and your bot token. <a href="/settings#account">Change it now</a>.
 </div>
 {{end}}
 {{if .Status.DiscordFatal}}

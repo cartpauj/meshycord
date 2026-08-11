@@ -25,10 +25,14 @@ type page struct {
 	Status      bridge.Status
 	UptimeText  string
 	HasPassword bool
-	HasToken    bool
-	Missing     []string
-	Flash       string
-	FlashKind   string
+	// DefaultPassword is true while the console still accepts the shipped
+	// admin/admin. The banner keyed off HasPassword alone would go quiet the
+	// moment a default existed, which is the failure mode worth avoiding.
+	DefaultPassword bool
+	HasToken        bool
+	Missing         []string
+	Flash           string
+	FlashKind       string
 	// Which console sections are switched on. Links, message history and
 	// contacts live in the Discord admin channel for now.
 	ShowLinks    bool
@@ -74,18 +78,19 @@ type linkCandidate struct {
 func (s *Server) newPage(r *http.Request, title string) *page {
 	st := s.bridge.Status(s.opts.DBPath)
 	p := &page{
-		Title:        title,
-		Version:      s.opts.Version,
-		DBPath:       s.opts.DBPath,
-		Status:       st,
-		UptimeText:   humanDuration(st.Uptime),
-		HasPassword:  s.cfg.HasPassword(),
-		HasToken:     s.cfg.BotToken() != "",
-		Missing:      s.cfg.MissingSettings(),
-		Cfg:          s.cfg,
-		ShowLinks:    ShowLinks,
-		ShowMessages: ShowMessages,
-		ShowContacts: ShowContacts,
+		Title:           title,
+		Version:         s.opts.Version,
+		DBPath:          s.opts.DBPath,
+		Status:          st,
+		UptimeText:      humanDuration(st.Uptime),
+		HasPassword:     s.cfg.HasPassword(),
+		DefaultPassword: s.cfg.IsDefaultPassword(),
+		HasToken:        s.cfg.BotToken() != "",
+		Missing:         s.cfg.MissingSettings(),
+		Cfg:             s.cfg,
+		ShowLinks:       ShowLinks,
+		ShowMessages:    ShowMessages,
+		ShowContacts:    ShowContacts,
 		CSRF: template.HTML(fmt.Sprintf(
 			`<input type="hidden" name="csrf" value="%s">`, template.HTMLEscapeString(s.csrfToken(r)))),
 	}

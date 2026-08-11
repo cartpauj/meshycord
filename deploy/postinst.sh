@@ -33,10 +33,17 @@ if command -v systemctl >/dev/null 2>&1; then
 
       http://<this-machine>:9150
 
-  You will need a Discord bot token and your server (guild) ID. The console
-  has no password yet — set one on the Settings page, or from the shell:
+      username: admin
+      password: admin
+
+  CHANGE THAT PASSWORD. It is the same on every install and it is printed in
+  the README, so until you change it anyone who can reach this machine can
+  read your message history and your Discord bot token. The console says so
+  on every page until you do. Settings page, or from the shell:
 
       sudo meshycord -db /var/lib/meshycord/db.sqlite -set-password 'something long'
+
+  You will also need a Discord bot token and your server (guild) ID.
 
   Plug the MeshCore node in over USB and it is found automatically. To see
   which serial devices are visible:

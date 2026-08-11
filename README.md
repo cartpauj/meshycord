@@ -24,7 +24,18 @@ That installs the latest release and starts it. **Run the same line again to
 update** — it always fetches the latest, and your settings, links and message
 history stay where they are.
 
-Then open `http://<the-machine>:9150` to finish setup.
+Then open `http://<the-machine>:9150` and sign in:
+
+| | |
+|---|---|
+| username | `admin` |
+| password | `admin` |
+
+> **Change that password before anything else.** It is the same on every
+> install and it is written above, so until you change it, anyone who can reach
+> the machine can read your message history and your Discord bot token. The
+> console warns on every page until you do. Settings → Console login, or
+> `sudo meshycord -db /var/lib/meshycord/db.sqlite -set-password 'something long'`
 
 <details>
 <summary>What that command does, and how to pin or undo it</summary>
@@ -128,22 +139,29 @@ every press after that is silently ignored.
 
 ### 2. Point it at your server
 
-Open `http://<the-machine>:9150` and fill in the bot token and your server ID.
+Open `http://<the-machine>:9150`, sign in with `admin` / `admin`, and fill in the
+bot token and your server ID.
 
 To find the server ID: open any channel in your server; the first long number in
 the browser URL is it. It is asked for rather than guessed because inferring it
 from the bot's membership only works when the bot is in exactly one server —
 which is a silent failure for anyone running it in two.
 
-**Set a console password** on the same page. There is no default, because a
-default password is worse than none: it looks secure and is not. Until one is
-set, the console is open to anyone who can reach the machine, and every page
-says so.
+**Change the console password** on the same page, under Console login. The
+shipped `admin` / `admin` is a lock on the door, not security: it is identical on
+every install and published in this file. It exists so the console asks for
+something from the very first request instead of serving the bot token to anyone
+who can reach the port — not so it can be left alone.
 
-The account name is **`admin`** until you change it, in Settings. There is no
-default password to go with it — the username alone opens nothing. A password must
-be at least 8 characters, and changing either the password or the username signs
-out every existing session.
+Every page carries a warning while the default is still in use, and it does not go
+away until the password actually changes. A default that quietly looked like a
+configured password would be the worse outcome: nobody fixes what nothing is
+complaining about.
+
+A password must be at least 8 characters. Changing it, or the username, signs out
+every existing session.
+
+The account name is also editable, in the same place.
 
 Expect the login page to pause for a second or two on a Pi Zero. That is bcrypt at
 its default cost, which is the point of it; repeated attempts from one address are
