@@ -31,7 +31,7 @@ func TestExactlyAtTheLimitStaysOneChunk(t *testing.T) {
 	}
 }
 
-// The bug this pins down: estimating the chunk count as len/133 ignores the 8
+// The bug this pins down: estimating the chunk count as len/limit ignores the 8
 // bytes each chunk reserves for its marker, so a ~390-character message passed
 // a "fits in 3" check and was then silently truncated.
 func TestCountMatchesWhatTheSplitterActuallyProduces(t *testing.T) {

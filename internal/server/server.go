@@ -373,6 +373,12 @@ func newLoginLimiter() *loginLimiter {
 const (
 	loginWindow   = time.Minute
 	loginMaxTries = 8
+	// loginSweepAt is when a sweep of the whole map becomes worth its cost.
+	// Attempts are only ever pruned for the address being checked, so without
+	// this an address that tries once and never returns keeps its entry for the
+	// life of the process — a slow leak on a box with 512 MB to spend, driven by
+	// anything that scans the network.
+	loginSweepAt = 1024
 )
 
 func (l *loginLimiter) allow(ip string) bool {
@@ -389,8 +395,27 @@ func (l *loginLimiter) allow(ip string) bool {
 		l.attempts[ip] = kept
 		return false
 	}
+	if len(l.attempts) >= loginSweepAt {
+		l.sweep(now)
+	}
 	l.attempts[ip] = append(kept, now)
 	return true
+}
+
+// sweep drops addresses with nothing left inside the window. Caller holds mu.
+func (l *loginLimiter) sweep(now time.Time) {
+	for addr, ts := range l.attempts {
+		live := false
+		for _, t := range ts {
+			if now.Sub(t) < loginWindow {
+				live = true
+				break
+			}
+		}
+		if !live {
+			delete(l.attempts, addr)
+		}
+	}
 }
 
 func (l *loginLimiter) reset(ip string) {

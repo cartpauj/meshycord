@@ -200,8 +200,7 @@ const (
 // and reports which was asked for.
 //
 // The prefix and all following whitespace are removed before anything else, so
-// they cost none of the 133-byte transmission budget and the recipient sees
-// only the text.
+// they cost none of the transmission budget and the recipient sees only the text.
 //
 // There is no per-message route flag in the companion protocol. The node picks
 // flood when a contact has no stored path and direct otherwise

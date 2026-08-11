@@ -348,7 +348,7 @@ func TestEncodeSendTxtMsg(t *testing.T) {
 	}
 }
 
-// The 133-byte ceiling is enforced at the encoder as a last line of defence,
+// The message ceiling is enforced at the encoder as a last line of defence,
 // and must never split a UTF-8 sequence while doing it.
 func TestEncodeClampsToTheMessageLimitOnAUTF8Boundary(t *testing.T) {
 	long := ""

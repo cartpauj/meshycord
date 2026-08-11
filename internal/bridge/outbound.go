@@ -268,7 +268,7 @@ func (r sendRequest) hasUI() bool { return r.UIChannel != "" && r.UIMessage != "
 
 // sendToMesh transmits text, splitting it if it does not fit.
 //
-// A message longer than 133 bytes becomes several transmissions. Rather than
+// A message longer than one transmission becomes several. Rather than
 // hiding that, each chunk is echoed back into Discord as its own message and
 // tracked separately, so you can see exactly how much airtime you used and
 // which transmissions actually landed.

@@ -7,17 +7,18 @@ import (
 
 // Message splitting.
 //
-// A mesh message is 133 bytes. Longer text becomes several transmissions, and
-// rather than hiding that, each one is echoed into Discord as its own message
-// and tracked separately — so you can see exactly how much airtime you used and
-// which transmissions actually landed.
+// A mesh message is meshcore.MaxMsgLen bytes, and less than that on a group
+// channel. Longer text becomes several transmissions, and rather than hiding
+// that, each one is echoed into Discord as its own message and tracked
+// separately — so you can see exactly how much airtime you used and which
+// transmissions actually landed.
 //
 // Two rules here are not obvious and both were learned the hard way:
 //
 //   - Never split mid-character. Cutting a UTF-8 sequence in half produces
 //     invalid bytes that render as mojibake whatever charset is declared.
 //   - Ask the splitter how many chunks it needs; never estimate. Computing
-//     len/133 under-counted, because splitting reserves 8 bytes per chunk for
+//     len/limit under-counted, because splitting reserves 8 bytes per chunk for
 //     the "[i/n] " prefix — so a ~390 character message passed the "will this
 //     fit in 3?" check and was then silently truncated. Silent truncation is
 //     the worst possible outcome: it looks like it sent.

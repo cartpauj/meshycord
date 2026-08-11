@@ -184,7 +184,7 @@ func TestResolveRouteWish(t *testing.T) {
 	}
 }
 
-// The prefix must not cost any of the 133-byte transmission budget.
+// The prefix must not cost any of the transmission budget.
 func TestRoutePrefixIsFreeOfTheByteBudget(t *testing.T) {
 	body := strings.Repeat("a", meshcore.MaxMsgLen)
 	text, wish := TakeRoutePrefix("path:flood " + body)

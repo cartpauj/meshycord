@@ -98,8 +98,13 @@ set, the console is open to anyone who can reach the machine, and every page
 says so.
 
 The account name is **`admin`** until you change it, in Settings. There is no
-default password to go with it — the username alone opens nothing. Changing
-either one signs out every existing session.
+default password to go with it — the username alone opens nothing. A password must
+be at least 8 characters, and changing either the password or the username signs
+out every existing session.
+
+Expect the login page to pause for a second or two on a Pi Zero. That is bcrypt at
+its default cost, which is the point of it; repeated attempts from one address are
+rate limited so the slow hash cannot be used against you.
 
 Saving in the console takes effect without a restart: the Discord connection
 retries on a backoff and picks up a corrected token or server id within about a
@@ -232,8 +237,12 @@ rather than anything in Discord:
 ```
 
 `contact-info` is the one that matters more than it sounds: it is where a **full
-public key** comes from, and `contact-remove` needs the full key rather than the
-12-character prefix a message shows.
+public key** comes from, which is what you need to add the same node on another
+radio, or to hand to somebody whose adverts do not reach you.
+
+The rest take a name, a 12-character key prefix, or a row number from the last
+listing — the bridge keeps a mirror of the contact list and resolves the full key
+itself, even for the commands whose protocol command requires one.
 
 `list` takes what to list, and optionally `unlinked` to hide what already has a
 channel and `sort` (most recently heard, name, or hops).
@@ -282,6 +291,14 @@ Three things follow from that, and they are the cases worth knowing:
 - **A resend held for a room login keeps the behaviour.** Otherwise 🔄 would
   work differently depending on whether the room happened to be logged in, which
   is not something you should have to think about.
+
+Often the route will already have been cleared before you press anything. A
+direct message sent along a stored path that gets no acknowledgement has that
+path cleared automatically when the deadline passes, on the same reasoning — the
+path is the prime suspect. The bridge does not resend on its own, though: the
+message may well have arrived with only the acknowledgement lost, and an
+automatic retry would post it twice. Clearing costs nothing and cannot duplicate
+anything; sending again is your call.
 
 The reaction is the only way to ask for a resend. A linked channel intercepts
 only the `path:` prefixes and `!promote`; everything else you type goes out over
@@ -376,7 +393,10 @@ server's keep-alive interval, so there is no expiry to schedule against.
   the room-session window, and the split limits
 
 `/healthz` answers `ok` without a login, for an uptime check or a monitoring
-probe. It is the only unauthenticated page once a password is set.
+probe. It reports that the process is serving, not that either link is up — the
+dashboard and `systemctl status` are where you look for that. The login page and
+`/static/` are necessarily unauthenticated too; every other page needs the
+password once one is set.
 
 The console is deliberately not the only way to drive this. It is not reachable
 when you are away from home, and the radio is — which is why the Discord admin
@@ -585,9 +605,9 @@ Built by [cartpauj](https://github.com/cartpauj), with Claude (Opus 5) doing mos
 of the typing.
 
 Protocol details here come from reading the MeshCore firmware rather than its
-documentation. Every entry in [PROTOCOL-NOTES.md](PROTOCOL-NOTES.md) cites the
-source file and line it was taken from, so anything you doubt can be checked
-against the firmware directly.
+documentation. [PROTOCOL-NOTES.md](PROTOCOL-NOTES.md) records the byte layouts and
+the gotchas, citing the firmware file and line wherever a claim rests on one, so
+anything you doubt can be checked at the source.
 
 ## Licence
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -383,5 +384,56 @@ func TestHiddenSectionsAreNotRouted(t *testing.T) {
 				t.Errorf("GET %s still links to %s", path, gone)
 			}
 		}
+	}
+}
+
+// Attempts are only ever pruned for the address being checked, so an address
+// that tries once and never returns keeps its entry for the life of the process.
+// Anything scanning the network drives that, and the box this runs on may have
+// 512 MB to spend.
+//
+// Timestamps are planted directly rather than slept through: the leak is about
+// entries outliving their window, and a test should not take a minute to say so.
+func TestLoginLimiterSweepsStaleAddresses(t *testing.T) {
+	l := newLoginLimiter()
+	stale := time.Now().Add(-2 * loginWindow)
+	for i := 0; i < loginSweepAt; i++ {
+		l.attempts[fmt.Sprintf("10.0.%d.%d", i/256, i%256)] = []time.Time{stale}
+	}
+
+	// The next real attempt is what triggers the sweep.
+	if !l.allow("192.0.2.7") {
+		t.Fatal("a first attempt was refused")
+	}
+	if got := len(l.attempts); got != 1 {
+		t.Errorf("limiter holds %d addresses; only the live one should remain", got)
+	}
+
+	// Sweeping must not weaken the limit. One attempt is already recorded above.
+	for i := 1; i < loginMaxTries; i++ {
+		if !l.allow("192.0.2.7") {
+			t.Fatalf("attempt %d was refused before the limit", i+1)
+		}
+	}
+	if l.allow("192.0.2.7") {
+		t.Error("the limit stopped applying after a sweep")
+	}
+}
+
+// A live address must survive a sweep, or a burst of traffic from elsewhere
+// would clear somebody's attempt history and hand them a fresh set of tries.
+func TestLoginLimiterKeepsLiveAttemptsThroughASweep(t *testing.T) {
+	l := newLoginLimiter()
+	for i := 0; i < loginMaxTries; i++ {
+		l.allow("192.0.2.7")
+	}
+	if l.allow("192.0.2.7") {
+		t.Fatal("setup: the limit did not apply")
+	}
+
+	l.sweep(time.Now())
+
+	if l.allow("192.0.2.7") {
+		t.Error("a sweep reset a limited address, so the limit can be bypassed by filling the map")
 	}
 }

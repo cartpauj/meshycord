@@ -734,7 +734,7 @@ func truncateUTF8(s string, n int) string {
 // names for Discord.
 func TruncateUTF8(s string, n int) string { return truncateUTF8(s, n) }
 
-// clampToLimit enforces the 133-byte ceiling as a last line of defence. The
+// clampToLimit enforces the MaxMsgLen ceiling as a last line of defence. The
 // bridge splits before it gets here; this makes an over-long message
 // impossible to put on the wire even if a caller forgets.
 func clampToLimit(s string) string { return truncateUTF8(s, MaxMsgLen) }
