@@ -604,8 +604,20 @@ void mesh_refresh_channels() {
   Serial.printf("[mesh] channels cached: %d\n", n);
 }
 
+bool mesh_reset_path(const String& prefix_hex) {
+  MeshContact c;
+  if (!mesh_lookup_contact(prefix_hex, c) || !c.found) return false;
+  uint8_t buf[1 + PUB_KEY_SZ];
+  buf[0] = CMD_RESET_PATH;
+  memcpy(&buf[1], c.pubkey, PUB_KEY_SZ);
+  Frame f;
+  if (!cmd(buf, sizeof(buf), 0xFF, &f)) return false;
+  return f.data[0] == PKT_OK;
+}
+
 bool mesh_send_dm(const String& prefix_hex, const String& text,
-                  uint32_t* ack_out, uint32_t* timeout_ms_out) {
+                  uint32_t* ack_out, uint32_t* timeout_ms_out,
+                  bool* flooded_out) {
   uint8_t key[32] = {0};
   size_t n = hex_to_bytes(prefix_hex, key, sizeof(key));
   if (n < 6) return false;
@@ -632,6 +644,7 @@ bool mesh_send_dm(const String& prefix_hex, const String& text,
     return false;
   }
   // RESP_CODE_SENT: [0x06][flood flag][expected_ack 4][est_timeout 4]
+  if (flooded_out && f.len >= 2) *flooded_out = (f.data[1] == 1);
   if (f.len >= 10) {
     uint32_t ack, est;
     memcpy(&ack, &f.data[2], 4);

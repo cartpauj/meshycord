@@ -12,6 +12,7 @@ static const uint8_t CMD_SEND_TXT_MSG        = 0x02;
 static const uint8_t CMD_SEND_CHANNEL_TXT    = 0x03;
 static const uint8_t CMD_GET_CONTACTS        = 0x04;
 static const uint8_t CMD_ADD_UPDATE_CONTACT  = 0x09;
+static const uint8_t CMD_RESET_PATH          = 0x0D;
 static const uint8_t CMD_SET_DEVICE_TIME     = 0x06;
 static const uint8_t CMD_SYNC_NEXT_MESSAGE   = 0x0A;
 static const uint8_t CMD_DEVICE_QUERY        = 0x16;
@@ -128,8 +129,18 @@ bool   mesh_channel_at(uint8_t idx, String& name_out);
 // Sends a DM. On success `ack_out` receives the expected-ACK handle and
 // `timeout_ms_out` the node's own estimate of how long delivery should take —
 // both from RESP_CODE_SENT. Pass nullptr if you do not care.
+// `flooded_out` reports which route the node actually used, from byte 1 of
+// RESP_CODE_SENT: true for flood, false for the contact's stored path.
 bool mesh_send_dm(const String& prefix_hex, const String& text,
-                  uint32_t* ack_out = nullptr, uint32_t* timeout_ms_out = nullptr);
+                  uint32_t* ack_out = nullptr, uint32_t* timeout_ms_out = nullptr,
+                  bool* flooded_out = nullptr);
+
+// Forget a contact's stored path so the next message floods instead of
+// following it. There is no per-message route flag in the protocol: the node
+// picks flood when out_path_len is unknown and direct otherwise
+// (BaseChatMesh.cpp:449), so clearing the path is the only way to force a
+// flood. The path is relearned from the reply.
+bool mesh_reset_path(const String& prefix_hex);
 
 // Pops a delivery confirmation pushed by the node (PUSH_CODE_SEND_CONFIRMED).
 // Returns false when none is pending.

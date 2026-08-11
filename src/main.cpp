@@ -334,15 +334,77 @@ static bool extract_prefix(const String& s, String& out) {
 // tracked separately, so you can see exactly how much airtime you used and
 // which transmissions actually landed. Silently truncating (the old behaviour
 // past 6 chunks) was the worst option: it looked like it sent.
+// Message prefixes that override how the node routes a message.
+//
+//   path:flood <text>    forget the stored path first, so this floods
+//   path:direct <text>   use the stored path (the default; here for symmetry)
+//
+// The prefix and every space or tab after it are removed before anything else,
+// so they cost none of the 133 byte transmission budget and do not count toward
+// the length limit. The recipient sees only the text.
+//
+// There is no per-message route flag in the companion protocol. The node picks
+// flood when a contact has no stored path and direct otherwise
+// (BaseChatMesh.cpp:449), so path:flood works by clearing the path. It is
+// relearned from the reply, so the effect is for this message rather than
+// permanent.
+enum RouteWish { ROUTE_AUTO, ROUTE_FORCE_FLOOD, ROUTE_FORCE_DIRECT };
+
+static RouteWish take_route_prefix(String& text) {
+  struct { const char* tag; RouteWish wish; } forms[] = {
+    { "path:flood",  ROUTE_FORCE_FLOOD  },
+    { "path:direct", ROUTE_FORCE_DIRECT },
+  };
+  String l = text; l.toLowerCase();
+
+  for (auto& f : forms) {
+    size_t n = strlen(f.tag);
+    if (!l.startsWith(f.tag)) continue;
+    // Must be the whole message or followed by whitespace, so a message that
+    // merely begins with these letters is not swallowed.
+    if (text.length() > n && text[n] != ' ' && text[n] != '\t') continue;
+
+    size_t i = n;
+    while (i < text.length() && (text[i] == ' ' || text[i] == '\t')) i++;
+    text = text.substring(i);
+    return f.wish;
+  }
+  return ROUTE_AUTO;
+}
+
 static void send_to_mesh_chunked(bool is_channel, uint8_t chan_idx,
-                                 const String& prefix, const String& text,
+                                 const String& prefix, const String& text_in,
                                  const String& react_channel = "",
                                  const String& react_message = "") {
+  String text = text_in;
+  RouteWish wish = take_route_prefix(text);
+
+  const bool ui = react_channel.length() && react_message.length();
+
+  if (wish != ROUTE_AUTO && is_channel) {
+    // Group messages are not addressed to a contact, so there is no stored path
+    // to clear or follow.
+    if (ui) discord_send(react_channel,
+      "`path:` prefixes only apply to direct messages and room servers. "
+      "Channel messages are always flooded.");
+  } else if (wish == ROUTE_FORCE_FLOOD) {
+    if (mesh_reset_path(prefix)) {
+      Serial.println("[bridge] path cleared, forcing flood");
+    } else if (ui) {
+      discord_send(react_channel,
+        "Could not clear the stored path, sending normally. "
+        "That needs the sender to be in the node's contact list.");
+    }
+  }
+  if (text.length() == 0) {
+    if (ui) discord_react(react_channel, react_message, EMOJI_FAIL);
+    return;
+  }
   String chunks[MAX_CHUNKS];
   size_t n = chunk_text(text, MESH_MAX_MSG_LEN, chunks, MAX_CHUNKS);
   if (n == 0) return;
 
-  const bool have_ui = react_channel.length() && react_message.length();
+  const bool have_ui = ui;
 
   // Ask the splitter itself how many transmissions this needs. Estimating it
   // separately (text.length()/133) under-counted, because splitting reserves 8
@@ -366,9 +428,14 @@ static void send_to_mesh_chunked(bool is_channel, uint8_t chan_idx,
   // Single transmission: the common case, no extra noise.
   if (n == 1) {
     uint32_t ack = 0, est = 0;
+    bool flooded = false;
     bool ok = is_channel ? mesh_send_channel(chan_idx, chunks[0])
-                         : mesh_send_dm(prefix, chunks[0], &ack, &est);
-    Serial.printf("[bridge] discord->mesh 1/1 %s\n", ok ? "ok" : "FAILED");
+                         : mesh_send_dm(prefix, chunks[0], &ack, &est, &flooded);
+    Serial.printf("[bridge] discord->mesh 1/1 %s (%s)\n", ok ? "ok" : "FAILED",
+                  is_channel ? "channel" : (flooded ? "flood" : "direct"));
+    if (ok && !is_channel && wish != ROUTE_AUTO && ui)
+      discord_send(react_channel, flooded ? "Sent by flood."
+                                          : "Sent via the stored path.");
     if (!have_ui) return;
     if (!ok)                 discord_react(react_channel, react_message, EMOJI_FAIL);
     else if (is_channel)     discord_react(react_channel, react_message, EMOJI_SENT);

@@ -250,6 +250,41 @@ history then lives in Discord, which is a better place for it than a queue on a
 microcontroller. Switching back to the app is always possible, you just leave
 the history behind.
 
+### Forcing a route
+
+MeshCore decides how to send a message on its own: it floods when it has no
+stored path for a contact, and follows the path when it has one. That is usually
+what you want, but a stale path keeps being used until something proves it wrong.
+
+Prefix a message in a linked channel to override it:
+
+```
+path:flood are you still on the ridge?
+path:direct are you still on the ridge?
+```
+
+The prefix is case insensitive and can be followed by a space or a tab. It and
+any whitespace after it are stripped before anything else happens, so they use
+none of the 133 byte transmission budget and do not count toward the 375
+character limit. The recipient sees only your text.
+
+A message that merely starts with those letters is left alone, so
+`path:flooding is a problem` sends as written.
+
+`path:flood` clears the contact's stored path first, so the message floods and
+the path is relearned from the reply. It affects that message rather than being
+a permanent setting. `path:direct` is the default and is there for symmetry.
+
+The bridge replies with which route was actually used, taken from the node's own
+report rather than assumed.
+
+There is no per-message route flag in the companion protocol, so this works by
+clearing the path (`CMD_RESET_PATH`) before sending. Two consequences: it only
+applies to direct messages and room servers, since channel messages are not
+addressed to a contact and are always flooded; and it needs the recipient to be
+in the node's contact list, because clearing a path requires their full public
+key.
+
 ### The inbox
 
 `#global-inbox` collects traffic from senders that do not have a channel yet.
