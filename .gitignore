@@ -1,0 +1,23 @@
+# Build output
+/meshycord
+/out/
+/dist/
+
+# Go
+*.test
+/vendor/
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Planning docs stay local — working notes, not a deliverable.
+PRD.md
+
+# Nothing secret belongs in this repo. Runtime config and the Discord bot
+# token live on the device, outside the source tree. If you add a local
+# config or database for testing, exclude it here.
+*.sqlite
+*.sqlite-*
+*.conf
