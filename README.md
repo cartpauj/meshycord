@@ -221,10 +221,9 @@ Three things follow from that, and they are the cases worth knowing:
   work differently depending on whether the room happened to be logged in, which
   is not something you should have to think about.
 
-Replying `retry` to a message does the same thing, and is switched off — the code
-is there, commented out, while the reaction is tried on its own. Worth knowing
-because of the trade: with it off, "retry" and "resend" are ordinary words and
-get transmitted over the radio like any other text.
+The reaction is the only way to ask for a resend. A linked channel intercepts
+only the `path:` prefixes and `!promote`; everything else you type goes out over
+the radio, so "retry" is just a message like any other.
 
 ### Promoting a sender
 
@@ -282,8 +281,8 @@ transmissions, about two seconds apart, each echoed into Discord as its own
 message and tracked separately — so you can see how much airtime you used and
 which pieces actually landed.
 
-Beyond that limit it is **refused, not truncated**. Silent truncation was the
-worst of the available options: it looked like it sent.
+Beyond that limit it is **refused, not truncated**, and the refusal says how much
+would have to go. Truncating silently looks identical to a successful send.
 
 ### Room servers
 
@@ -430,23 +429,16 @@ they are the shape of what a bridge like this can and cannot do:
 - **Discord mentions do not translate.** A Discord account is not a mesh node, so
   there is nothing sensible to turn one into. Use MeshCore's `@[Node Name]`.
 
-### Why the Gateway, and not just REST
-
-Worth stating plainly, because it is the one architectural choice everything else
-follows from: **reactions cannot be received over REST.** Not "are slow to" —
-cannot. Discord's complete webhook event list is twelve types, all concerning app
-authorization, entitlements, quests and Social-SDK lobbies. Discord's own wording
-is that events for channels, guilds, roles and messages "are only available over
-Gateway", and there is no endpoint to poll for pending interactions.
-
-So 🔄 resends, buttons, modals and ephemeral replies all require holding a
-websocket open. That is also what makes replies instant rather than as stale as
-your polling interval, and what makes the cost of another linked channel flat
-instead of another thing to sweep.
-
 ---
 
 ## Design notes
+
+**Discord is spoken over the Gateway websocket.** Reactions, buttons, modals and
+ephemeral replies are delivered there and nowhere else — Discord's webhook events
+cover app authorization, entitlements, quests and Social-SDK lobbies, and its own
+documentation says events for channels, guilds, roles and messages "are only
+available over Gateway". So 🔄 needs an open socket, and the socket is what makes
+replies arrive as fast as the radio can carry them.
 
 **Six dependencies, all pure Go.** `golang.org/x/sys` (termios),
 `golang.org/x/crypto` (bcrypt), `modernc.org/sqlite`, `github.com/coder/websocket`,
@@ -504,14 +496,10 @@ debugging.
 Built by [cartpauj](https://github.com/cartpauj), with Claude (Opus 5) doing most
 of the typing.
 
-One thing worth passing on, because it cost real time: a model will write
-confident, plausible protocol code and get the details wrong until you make it
-read the firmware. The message ceiling in here was 133 bytes for a long while,
-sourced from documentation rather than from `BaseChatMesh.h`, where it is
-`10 * CIPHER_BLOCK_SIZE` — 160. That quietly wasted about a fifth of every
-transmission and split messages that would have fitted in one. Every gotcha in
-[PROTOCOL-NOTES.md](PROTOCOL-NOTES.md) has a firmware line reference for the same
-reason.
+Protocol details here come from reading the MeshCore firmware rather than its
+documentation. Every entry in [PROTOCOL-NOTES.md](PROTOCOL-NOTES.md) cites the
+source file and line it was taken from, so anything you doubt can be checked
+against the firmware directly.
 
 ## Licence
 
