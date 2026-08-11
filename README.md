@@ -158,7 +158,7 @@ marker saying what happened:
 | ✅ | the recipient's node acknowledged it |
 | 📡 | transmitted — no acknowledgement is possible |
 | ❌ | rejected, or no acknowledgement before the deadline |
-| 🔄 | *you* add this to your own failed message to ask for a resend |
+| 🔄 | *you* add this to your own failed message to ask for a resend, which also clears the stored route so the retry floods |
 
 The difference between ✅ and 📡 is not decoration: **MeshCore cannot
 acknowledge group messages at all.** A channel send can only ever be reported as
@@ -209,6 +209,24 @@ replaced by ⏳ while the bridge works. That is deliberate: it means a second
 press works, where a reaction left in place would be ignored by Discord as
 already present.
 
+**A resend clears the stored route first, so it floods.** A message usually
+needs sending again because the recorded route went stale — somebody moved, or a
+repeater in the middle went away — and the node keeps using a stored path until
+something proves it wrong. Repeating the send down that same path is the retry
+least likely to work. The route is relearned from the reply, so this is not
+permanent.
+
+Three things follow from that, and they are the cases worth knowing:
+
+- **Direct messages and room servers only.** A mesh channel is not addressed to
+  a contact, so there is no stored route to clear; those resends simply go out
+  again, and the bridge does not editorialise about it.
+- **A `path:direct` prefix wins.** If you typed it and then reacted 🔄, you
+  meant the route you have, so the resend stays direct.
+- **A resend held for a room login keeps the behaviour.** Otherwise 🔄 would
+  work differently depending on whether the room happened to be logged in, which
+  is not something you should have to think about.
+
 Replying `retry` used to do the same thing — that was the ESP32's only option,
 since reactions cannot be polled for. It is commented out rather than deleted
 while the reaction path is tried on its own; note that with it off, the words
@@ -228,7 +246,7 @@ Same thing as `/mesh link`, just closer to hand.
 ### Mentioning someone
 
 Don't use Discord's `@` autocomplete — it puts a raw account id in the message,
-which is 21 bytes of a 133-byte budget and means nothing on the radio. A Discord
+which is 21 bytes of a 160-byte budget and means nothing on the radio. A Discord
 account is not a mesh node, so there is nothing sensible to translate it into.
 
 MeshCore's own convention works, because it is plain text and passes through
@@ -247,7 +265,7 @@ path:flood <text>     clear the stored path first, so this floods
 path:direct <text>    use the stored path (the default)
 ```
 
-The prefix costs none of the 133-byte budget and the recipient never sees it.
+The prefix costs none of the 160-byte budget and the recipient never sees it.
 Only meaningful for direct messages and room servers — channel messages are
 always flooded.
 
@@ -255,6 +273,10 @@ There is no per-message route flag in MeshCore; the node picks flood when a
 contact has no stored path and direct otherwise, so `path:flood` works by
 clearing the path. It is relearned from the reply, so the effect is for that
 message rather than permanent.
+
+A 🔄 resend does the same thing without a prefix — see
+[Resending](#resending). `path:direct` is how you override that and retry down
+the route you already have.
 
 ### Long messages
 
@@ -439,17 +461,23 @@ them:
 
 - The companion serves **one client at a time**. The phone app cannot connect
   while the bridge holds the link.
-- **133 bytes** per message.
+- **160 bytes** per message, less the node's own name on a group channel.
 - Group messages **cannot be acknowledged**, so delivery is never confirmable
   for those.
+- **Only one route per received message is visible.** MeshCore deduplicates by
+  packet hash below the app layer, so copies arriving by other routes are gone
+  before the companion protocol sees them. The hop count shown describes one
+  path, not all of them.
 
 ---
 
 ## Design notes
 
-**Five dependencies, all pure Go.** `golang.org/x/sys` (termios),
+**Six dependencies, all pure Go.** `golang.org/x/sys` (termios),
 `golang.org/x/crypto` (bcrypt), `modernc.org/sqlite`, `github.com/coder/websocket`,
-`tinygo.org/x/bluetooth`. No Discord library: REST is hand-written on
+`tinygo.org/x/bluetooth`, and `github.com/godbus/dbus/v5`, which is how BlueZ is
+driven — Linux exposes Bluetooth over D-Bus and there is no way around that.
+No Discord library: REST is hand-written on
 `net/http` and the Gateway protocol implemented directly. The ESP32 version
 hand-wrote REST and that part was never the problem — the standard library gives
 TLS, keep-alive, connection pooling and JSON for free, so what is left is small
@@ -494,6 +522,21 @@ debugging.
 
 ---
 
+## Credits
+
+Built by [cartpauj](https://github.com/cartpauj) with Claude (Opus 5) doing most
+of the typing.
+
+The same caveat as the ESP32 version, which has not stopped being true: the model
+writes the code, and it will confidently get protocol details wrong until you
+make it read the firmware. The 160-byte message ceiling in this document was
+carried over as 133 from notes nobody had checked, which quietly cost about a
+fifth of every transmission and split messages that would have fitted in one. It
+was found by reading `BaseChatMesh.h`, not by reading documentation.
+
 ## Licence
 
 GPL v3. See [LICENSE](LICENSE).
+
+MeshCore itself is GPL v3, and this reads its source closely enough that GPL is
+the right fit regardless.
