@@ -137,6 +137,12 @@ static void handle_root() {
   p += "<label><input type=checkbox name=acroom";
   p += g_settings.autocreate_rooms ? " checked" : "";
   p += "> Auto-create channels for room servers</label>";
+  p += "<label><input type=checkbox name=acdm";
+  p += g_settings.autocreate_dms ? " checked" : "";
+  p += "> Auto-create channels for direct messages</label>";
+  p += "<small>Direct messages are the riskiest to automate: anyone who has "
+       "heard your advert can send you one. Only known contacts trigger it; "
+       "strangers always go to the inbox.</small>";
 
   p += "<h2>Web UI login</h2>";
   p += "<label>Username</label><input name=uiuser value='" + esc(g_settings.ui_user) + "'>";
@@ -249,6 +255,7 @@ static void handle_save() {
 
   g_settings.autocreate_channels = g_http.hasArg("acchan");
   g_settings.autocreate_rooms    = g_http.hasArg("acroom");
+  g_settings.autocreate_dms      = g_http.hasArg("acdm");
 
   if (g_http.hasArg("uiuser") && g_http.arg("uiuser").length())
     g_settings.ui_user = g_http.arg("uiuser");
@@ -307,8 +314,8 @@ static void handle_link() {
   } else if (route_find(rk, key)) {
     p += "<h1>Already linked</h1>";
   } else {
-    String id = discord_create_channel(name, topic, "",
-                                       "node-" + key.substring(0, 6));
+    String id = admin_create_channel(rk, name, topic,
+                                     "node-" + key.substring(0, 6));
     if (id.length()) {
       route_put(rk, key, id, label);
       p += "<h1>Linked</h1><p>Created <b>#" +

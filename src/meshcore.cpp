@@ -666,6 +666,38 @@ bool mesh_send_channel(uint8_t channel_idx, const String& text) {
   return true;
 }
 
+bool mesh_add_contact(const String& pubkey_hex, const String& name, uint8_t type) {
+  uint8_t key[PUB_KEY_SZ];
+  if (hex_to_bytes(pubkey_hex, key, sizeof(key)) != PUB_KEY_SZ) {
+    Serial.println("[mesh] add_contact needs a full 32-byte (64 hex) key");
+    return false;
+  }
+
+  uint8_t buf[1 + PUB_KEY_SZ + 1 + 1 + 1 + MAX_PATH_SZ + 32 + 4];
+  memset(buf, 0, sizeof(buf));
+  size_t o = 0;
+  buf[o++] = CMD_ADD_UPDATE_CONTACT;
+  memcpy(&buf[o], key, PUB_KEY_SZ); o += PUB_KEY_SZ;
+  buf[o++] = type;              // ADV_TYPE_CHAT or ADV_TYPE_ROOM
+  buf[o++] = 0;                 // flags
+  buf[o++] = 0xFF;              // out_path_len: no known path, flood to find one
+  o += MAX_PATH_SZ;             // out_path stays zeroed
+  {
+    String nm = utf8_truncate(name, 31);
+    memcpy(&buf[o], nm.c_str(), nm.length());
+  }
+  o += 32;
+  o += 4;                       // last_advert_timestamp: 0, never heard yet
+
+  Frame f;
+  if (!cmd(buf, o, 0xFF, &f)) return false;
+  if (f.data[0] != PKT_OK) {
+    Serial.printf("[mesh] add_contact rejected (0x%02X)\n", f.data[0]);
+    return false;
+  }
+  return true;
+}
+
 bool mesh_room_login(const String& prefix_hex, const String& password) {
   // Needs the FULL public key, so resolve it from the contact cache first.
   MeshContact c;

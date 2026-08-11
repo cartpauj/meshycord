@@ -25,6 +25,7 @@ void settings_load() {
   g_settings.ble_pin        = p.getString("ble_pin", "");
   g_settings.autocreate_channels = p.getBool("ac_chan", false);
   g_settings.autocreate_rooms    = p.getBool("ac_room", false);
+  g_settings.autocreate_dms      = p.getBool("ac_dm", false);
   p.end();
 
   Serial.printf("[cfg] loaded: configured=%d ssid='%s' guild='%s' inbox='%s'\n",
@@ -53,6 +54,7 @@ void settings_save() {
   p.putString("ble_pin",   g_settings.ble_pin);
   p.putBool  ("ac_chan",    g_settings.autocreate_channels);
   p.putBool  ("ac_room",    g_settings.autocreate_rooms);
+  p.putBool  ("ac_dm",      g_settings.autocreate_dms);
   p.end();
   Serial.println("[cfg] saved");
 }

@@ -34,6 +34,11 @@ struct Settings {
   // filling their server.
   bool autocreate_channels = false;
   bool autocreate_rooms    = false;
+  // Riskiest of the three: anyone who has heard your advert can send you a DM,
+  // so this is the switch that lets a stranger create a channel in your server.
+  // Only fires for senders already in the node's contact list; an unknown
+  // sender always goes to the inbox.
+  bool autocreate_dms      = false;
 
   // The inbox channel is always created by the bridge, so it is never asked
   // for. The guild IS required: auto-detecting it from the bot's membership

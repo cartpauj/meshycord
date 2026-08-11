@@ -57,10 +57,6 @@ String discord_create_channel(const String& name, const String& topic,
 // Find (or create) a CATEGORY by name. Categories are channels of type 4.
 String discord_find_or_create_category(const String& name);
 
-// Move an existing channel into a category. Used by `tidy` to fix channels
-// that were created before categories existed.
-bool discord_move_channel(const String& channel_id, const String& parent_id);
-
 // Look for an existing text channel with this (sanitized) name in the guild and
 // return its id, or "" if absent. Used so the admin channel survives a reboot
 // or being recreated by hand.

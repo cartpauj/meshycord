@@ -11,6 +11,7 @@ static const uint8_t CMD_APP_START           = 0x01;
 static const uint8_t CMD_SEND_TXT_MSG        = 0x02;
 static const uint8_t CMD_SEND_CHANNEL_TXT    = 0x03;
 static const uint8_t CMD_GET_CONTACTS        = 0x04;
+static const uint8_t CMD_ADD_UPDATE_CONTACT  = 0x09;
 static const uint8_t CMD_SET_DEVICE_TIME     = 0x06;
 static const uint8_t CMD_SYNC_NEXT_MESSAGE   = 0x0A;
 static const uint8_t CMD_DEVICE_QUERY        = 0x16;
@@ -137,3 +138,14 @@ bool mesh_send_channel(uint8_t channel_idx, const String& text);
 
 // Log into a room server (needed before it will relay messages).
 bool mesh_room_login(const String& prefix_hex, const String& password);
+
+// Add (or update) a contact on the node from a full 32-byte public key.
+//
+// Layout per updateContactFromFrame (MyMesh.cpp:189):
+//   [0x09][pubkey 32][type][flags][out_path_len][out_path 64][name 32]
+//   [last_advert 4]   then optional [lat 4][lon 4][lastmod 4]
+//
+// out_path_len is set to 0xFF meaning "no known path", so the node floods until
+// it learns one. Intended for adding a node seen on the public map, which
+// adverts cannot reach.
+bool mesh_add_contact(const String& pubkey_hex, const String& name, uint8_t type);

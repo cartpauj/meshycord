@@ -44,6 +44,18 @@ void admin_handle(const String& content);
 // rather than not at all.
 String admin_category_for(RouteKind kind);
 
+// Create a channel in the category for `kind`, retrying once if the cached
+// category id turns out to be stale.
+//
+// Category ids are cached in RAM. If someone deletes a category in Discord the
+// cached id keeps being used as a parent, and EVERY channel creation fails until
+// the device reboots. This re-resolves and retries instead.
+String admin_create_channel(RouteKind kind, const String& name,
+                            const String& topic, const String& name_fallback = "");
+
+// Drop cached category ids so the next use re-finds or recreates them.
+void admin_forget_categories();
+
 // Post the greeting/help once after boot, so the channel shows it is alive.
 void admin_announce_ready();
 

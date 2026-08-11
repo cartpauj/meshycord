@@ -148,7 +148,7 @@ not repeated. Direct messages also show the sender's key, which is what you use
 to link them:
 
 ```
-Alex  a3f19c000000    direct, snr 11.2
+Alex  a3f19c000000    heard direct, snr 11.2
 on my way
 ```
 
@@ -164,9 +164,20 @@ exactly one copy, the first to land. That is usually the fastest route, which is
 not necessarily the shortest. The other copies were received by the radio but
 are dropped before anything above sees them.
 
-`direct` means the packet arrived by a direct route rather than flooding, where
-a hop count does not apply. The node reports `0xFF` for that case rather than a
-number.
+There are three forms:
+
+* **`N hops`** is a flood-routed packet, where each repeater appended itself to
+  the path. The number is real.
+* **`heard direct`** is a flood-routed packet with nothing appended, so you
+  received it straight from the sender with no repeater in between.
+* **`via known path`** means the packet used MeshCore's direct routing, where
+  the sender already knew a route and supplied it. That path can be many hops
+  long, so this says nothing about distance. The node reports `0xFF` rather than
+  a count for these, because the hop count is not carried.
+
+That last one is worth being clear about. `ROUTE_TYPE_DIRECT` in MeshCore means
+"a path was supplied", not "the sender was nearby". A station hundreds of miles
+away with an established route sends direct-routed packets.
 
 This is also why the phone app can show a repeat count and this bridge cannot.
 The app watches raw radio traffic below the deduplication and counts copies of
@@ -294,6 +305,14 @@ interval, and two policy switches:
   is usually safe to leave on.
 * **Auto-create channels for room servers.** Off by default. A busy mesh can
   have dozens of rooms, and Discord caps a category at 50.
+* **Auto-create channels for direct messages.** Off by default, and the riskiest
+  of the three. Anyone who has heard your advert can send you a DM, so this is
+  the switch that lets a stranger cause a channel to be created.
+
+All three only ever fire for senders the node already knows. A message from
+something not in the contact list cannot be classified as a person or a room,
+and there is nothing to name a channel after, so it always goes to the inbox
+regardless of these settings.
 
 The page also lists contacts and channels with search boxes and buttons to
 create a Discord channel for any of them. The admin console does the same thing
@@ -322,6 +341,11 @@ find one that already exists.
 
 **Room servers are never bulk-created automatically.** `sync rooms` exists for
 when you really want all of them, and it asks first.
+
+**Unknown senders always go to the inbox.** Auto-create needs the contact record
+to tell a person from a room server, and needs a name for the channel. Neither
+exists for a stranger, so the inbox is the only sensible destination. This is
+also what stops an unknown node from filling the server with channels.
 
 ## Known limitations
 

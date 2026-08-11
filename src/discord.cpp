@@ -295,14 +295,6 @@ String discord_find_or_create_category(const String& name) {
   return id;
 }
 
-bool discord_move_channel(const String& channel_id, const String& parent_id) {
-  if (channel_id.length() == 0 || parent_id.length() == 0) return false;
-  String body = String("{\"parent_id\":\"") + parent_id + "\"}";
-  String resp;
-  int code = http_request("PATCH", String(API_BASE) + "/channels/" + channel_id,
-                          body, &resp);
-  return code >= 200 && code < 300;
-}
 
 bool discord_delete_channel(const String& channel_id) {
   if (channel_id.length() == 0) return false;

@@ -84,9 +84,9 @@ static String destination_for(const MeshMessage& m, String& label_out) {
     String cname = mesh_channel_name(m.channel_idx);
     // No prefix: the "Channels" category already conveys that.
     String name  = cname.length() ? cname : ("channel-" + key);
-    String id = discord_create_channel(name, "MeshCore channel " + key +
-                                             (cname.length() ? " (" + cname + ")" : ""),
-                                       admin_category_for(ROUTE_CHANNEL));
+    String id = admin_create_channel(ROUTE_CHANNEL, name,
+                                     "MeshCore channel " + key +
+                                     (cname.length() ? " (" + cname + ")" : ""));
     if (id.length()) {
       route_put(ROUTE_CHANNEL, key, id, cname.length() ? cname : name);
       label_out = cname.length() ? cname : name;
@@ -118,16 +118,29 @@ static String destination_for(const MeshMessage& m, String& label_out) {
   if (known && c.type == ADV_TYPE_ROOM && g_settings.autocreate_rooms) {
     String name = c.name.length() ? c.name : prefix;   // no prefix; the
                                                        // category says it
-    String id = discord_create_channel(name, "MeshCore room server",
-                                       admin_category_for(ROUTE_ROOM),
-                                       "node-" + prefix.substring(0, 6));
+    String id = admin_create_channel(ROUTE_ROOM, name, "MeshCore room server",
+                                     "node-" + prefix.substring(0, 6));
     if (id.length()) {
       route_put(ROUTE_ROOM, prefix, id, c.name);
       return id;
     }
   }
 
-  // A person, or an unknown sender: inbox. Promotion happens on reply.
+  // A known person, if that policy is enabled. Deliberately requires the sender
+  // to be in the node's contact list: an unknown sender cannot be classified or
+  // named, and letting strangers create channels is the abuse vector this whole
+  // policy exists to avoid.
+  if (known && c.type == ADV_TYPE_CHAT && g_settings.autocreate_dms) {
+    String name = c.name.length() ? c.name : prefix;
+    String id = admin_create_channel(ROUTE_DM, name, "MeshCore DM " + prefix,
+                                     "node-" + prefix.substring(0, 6));
+    if (id.length()) {
+      route_put(ROUTE_DM, prefix, id, c.name);
+      return id;
+    }
+  }
+
+  // Otherwise the inbox: an unknown sender, or a person with auto-create off.
   return g_settings.inbox_channel;
 }
 
@@ -142,9 +155,14 @@ static String author_name(const MeshMessage& m) {
 
 static String format_inbound(const MeshMessage& m, const String& label) {
   // Hops and signal, shown for every message.
+  // Wording matters here. MeshCore's ROUTE_TYPE_DIRECT means "the sender used a
+  // stored path", which can be many hops; it does NOT mean the sender was heard
+  // first-hand. Calling that "direct" read as "nearby" and was misleading for a
+  // node hundreds of miles away. Genuine adjacency is a FLOOD packet with zero
+  // hops accumulated.
   String meta = "  _";
-  if (!m.have_hops)      meta += "direct";        // 0xFF: direct route
-  else if (m.hops == 0)  meta += "0 hops";        // flood, heard first-hand
+  if (!m.have_hops)      meta += "via known path";  // 0xFF: routed, hops n/a
+  else if (m.hops == 0)  meta += "heard direct";    // flood, no repeaters
   else { meta += String((int)m.hops); meta += (m.hops == 1 ? " hop" : " hops"); }
   if (m.have_snr) { meta += ", snr "; meta += String(m.snr, 1); }
   meta += "_";
@@ -406,9 +424,8 @@ static void handle_discord_message(Route* r, const DiscordMessage& dm) {
       MeshContact c;
       mesh_lookup_contact(prefix, c);
       String name = c.name.length() ? c.name : prefix;
-      String id = discord_create_channel(name, "MeshCore DM " + prefix,
-                                         admin_category_for(ROUTE_DM),
-                                         "node-" + prefix.substring(0, 6));
+      String id = admin_create_channel(ROUTE_DM, name, "MeshCore DM " + prefix,
+                                       "node-" + prefix.substring(0, 6));
       if (id.length()) {
         route_put(ROUTE_DM, prefix, id, c.name);
         discord_send(r->channel_id, "Promoted `" + prefix + "` to <#" + id + ">");
@@ -471,9 +488,13 @@ static void poll_channel(const String& channel_id, String& cursor_io,
                     channel_id.c_str(), route_or_null->key.c_str());
       route_remove(route_or_null->kind, route_or_null->key);
     } else if (gone) {
-      Serial.println("[bridge] inbox channel deleted, will recreate");
+      // Rebuild immediately. Leaving inbox_channel empty until the next reboot
+      // means destination_for() returns nothing and unrouted messages are
+      // silently dropped.
+      Serial.println("[bridge] inbox channel deleted, recreating now");
       g_settings.inbox_channel = "";
       settings_save();
+      admin_bootstrap();
     }
     return;
   }

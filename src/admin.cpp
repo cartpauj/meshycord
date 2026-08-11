@@ -48,12 +48,31 @@ static String cat_cached(String& slot, const char* name) {
   return slot;
 }
 
+void admin_forget_categories() {
+  g_cat_admin = ""; g_cat_chan = ""; g_cat_room = ""; g_cat_dm = "";
+}
+
 String admin_category_for(RouteKind kind) {
   switch (kind) {
     case ROUTE_CHANNEL: return cat_cached(g_cat_chan, "Channels");
     case ROUTE_ROOM:    return cat_cached(g_cat_room, "Room Servers");
     default:            return cat_cached(g_cat_dm,   "Companion DMs");
   }
+}
+
+String admin_create_channel(RouteKind kind, const String& name,
+                            const String& topic, const String& name_fallback) {
+  String id = discord_create_channel(name, topic, admin_category_for(kind),
+                                     name_fallback);
+  if (id.length()) return id;
+
+  // Most likely the cached category was deleted in Discord, leaving a dead
+  // parent id. Forget them and try once more; the category gets recreated as a
+  // side effect of asking for it again.
+  Serial.println("[admin] create failed; refreshing categories and retrying");
+  admin_forget_categories();
+  return discord_create_channel(name, topic, admin_category_for(kind),
+                                name_fallback);
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -277,8 +296,8 @@ static void do_add(const String& token, const String& custom_name) {
   // If the label sanitises to nothing (an emoji-only name that somehow still
   // yields nothing, or pure punctuation), fall back to something unique rather
   // than a generic word that every such contact would share.
-  String id = discord_create_channel(name, topic, admin_category_for(kind),
-                                     "node-" + key.substring(0, 6));
+  String id = admin_create_channel(kind, name, topic,
+                                   "node-" + key.substring(0, 6));
   if (id.length()) {
     route_put(kind, key, id, label);
     reply("Linked **" + label + "** `" + key + "` -> <#" + id + ">");
@@ -304,40 +323,6 @@ static void do_remove(const String& token) {
   } else {
     reply("**" + label + "** was not linked.");
   }
-}
-
-// Move the admin channel, the inbox and every linked channel into its category.
-// Channels created before categories existed are left floating above them, and
-// this fixes them without anyone dragging channels around by hand.
-static void do_tidy() {
-  int moved = 0, failed = 0;
-
-  // Create all four up front. Creating them only on demand meant a bridge with
-  // no links yet showed no categories at all, which just looks broken.
-  String cat_main = cat_cached(g_cat_admin, "MeshyCord");
-  admin_category_for(ROUTE_CHANNEL);
-  admin_category_for(ROUTE_ROOM);
-  admin_category_for(ROUTE_DM);
-  if (cat_main.length()) {
-    if (g_settings.admin_channel.length() &&
-        discord_move_channel(g_settings.admin_channel, cat_main)) moved++;
-    if (g_settings.inbox_channel.length() &&
-        discord_move_channel(g_settings.inbox_channel, cat_main)) moved++;
-  }
-
-  for (size_t i = 0; i < routes_count(); i++) {
-    Route* r = routes_at(i);
-    String cat = admin_category_for(r->kind);
-    if (cat.length() && discord_move_channel(r->channel_id, cat)) moved++;
-    else failed++;
-  }
-
-  String s = "Tidied. Moved " + String(moved) + " channel(s)";
-  if (failed) s += ", " + String(failed) + " failed";
-  s += ".\nCategories ready: **MeshyCord**, **Channels**, **Room Servers**, "
-       "**Companion DMs**.\nEmpty categories are normal until you link "
-       "something.";
-  reply(s);
 }
 
 // Explicit, never automatic: linking every room server can mean dozens of
@@ -368,13 +353,67 @@ static void do_sync_rooms(bool confirmed) {
     String key(pref);
     if (route_find(ROUTE_ROOM, key)) continue;
     String label = c.name.length() ? c.name : key;
-    String id = discord_create_channel(label, "MeshCore room " + key,
-                                       admin_category_for(ROUTE_ROOM),
-                                       "node-" + key.substring(0, 6));
+    String id = admin_create_channel(ROUTE_ROOM, label, "MeshCore room " + key,
+                                     "node-" + key.substring(0, 6));
     if (id.length()) { route_put(ROUTE_ROOM, key, id, label); created++; }
     delay(1500);
   }
   reply("Linked " + String(created) + " room server(s).");
+}
+
+// Add a contact from a full public key, for a node seen on the public map that
+// adverts cannot reach. Auto-add only ever fires for nodes heard over the air.
+static void do_contact_add(const String& rest) {
+  String args = rest; args.trim();
+  if (args.length() == 0) {
+    reply("Usage: `contact add <64-hex-key> [name]`, or add `room` at the end "
+          "for a room server.\nThe key is the node's full public key, as shown "
+          "on the public map.");
+    return;
+  }
+
+  int sp = args.indexOf(' ');
+  String key  = (sp < 0) ? args : args.substring(0, sp);
+  String name = (sp < 0) ? ""   : args.substring(sp + 1);
+  name.trim();
+
+  uint8_t type = ADV_TYPE_CHAT;
+  String lower_name = name; lower_name.toLowerCase();
+  if (lower_name.endsWith(" room") || lower_name == "room") {
+    type = ADV_TYPE_ROOM;
+    name = name.substring(0, name.length() - 4);
+    name.trim();
+  }
+
+  key.trim(); key.toLowerCase();
+  if (key.length() != 64) {
+    reply("That key is " + String((int)key.length()) + " characters. A full "
+          "public key is 64 hex characters. The 12-character prefix shown next "
+          "to a message is not enough to add a contact, though `add <prefix>` "
+          "can still link a channel for them.");
+    return;
+  }
+  for (size_t i = 0; i < key.length(); i++) {
+    char c = key[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+      reply("That key is not hexadecimal.");
+      return;
+    }
+  }
+
+  if (!mesh_connected()) { reply("Not connected to the node right now."); return; }
+
+  if (!mesh_add_contact(key, name, type)) {
+    reply("The node rejected that contact.");
+    return;
+  }
+  mesh_refresh_contacts();      // so it shows up in listings straight away
+
+  String shown = name.length() ? name : key.substring(0, 12);
+  reply("Added **" + shown + "** as a " +
+        String(type == ADV_TYPE_ROOM ? "room server" : "contact") +
+        ".\nKey prefix `" + key.substring(0, 12) + "`. "
+        "Link a channel for it with `add " + key.substring(0, 12) + "`.");
 }
 
 static void do_status() {
@@ -403,8 +442,10 @@ static void do_help() {
     "add <keyprefix>      link by 12-char key, even if not a contact\n"
     "add <n> as <name>    choose the Discord channel name\n"
     "remove <n|keyprefix> unlink\n"
+    "\n"
+    "contact add <64-hex-key> [name]   add a node seen on the public map\n"
+    "contact add <key> <name> room     ...as a room server\n"
     "status\n"
-    "tidy                 move channels into their categories\n"
     "sync rooms           link every known room server (asks first)\n"
     "reset                delete everything the bridge created\n"
     "help\n"
@@ -428,11 +469,12 @@ void admin_handle(const String& raw) {
 
   if (lower == "help" || lower == "?")   { do_help();   return; }
   if (lower == "status")                 { do_status(); return; }
-  if (lower == "tidy")                   { do_tidy();   return; }
   if (lower == "reset")                  { do_reset(false); return; }
   if (lower == "reset confirm")          { do_reset(true);  return; }
   if (lower == "sync rooms")             { do_sync_rooms(false); return; }
   if (lower == "sync rooms confirm")     { do_sync_rooms(true);  return; }
+  if (lower.startsWith("contact add ")) { do_contact_add(c.substring(12)); return; }
+  if (lower == "contact add")           { do_contact_add(""); return; }
 
   if (lower.startsWith("add ")) {
     String rest = c.substring(4); rest.trim();
@@ -553,21 +595,13 @@ static void do_reset(bool confirmed) {
         "A fresh **global-inbox** has been created.");
 }
 
-// One-time marker so the "move existing channels into categories" sweep runs
-// once rather than costing API calls on every boot.
-static bool bootstrap_done_flag() {
-  Preferences p; p.begin("meshy", true);
-  bool v = p.getBool("boot_done", false);
-  p.end();
-  return v;
-}
-static void set_bootstrap_done() {
-  Preferences p; p.begin("meshy", false);
-  p.putBool("boot_done", true);
-  p.end();
-}
-
 bool admin_bootstrap() {
+  // Re-resolve categories from scratch. Bootstrap also runs at runtime when a
+  // channel is found deleted, and by then a cached category id may be stale
+  // because that was deleted too. Four extra lookups on a rare path is a fair
+  // price for not creating channels with a dead parent.
+  admin_forget_categories();
+
   // Verify the ids we have before trusting them. Channels deleted by hand would
   // otherwise never come back, because the create step is skipped whenever an
   // id is stored.
@@ -625,17 +659,6 @@ bool admin_bootstrap() {
     i++;
   }
 
-  // First run only: adopt channels that predate the categories.
-  if (!bootstrap_done_flag()) {
-    int moved = 0;
-    for (size_t i = 0; i < routes_count(); i++) {
-      Route* r = routes_at(i);
-      String c = admin_category_for(r->kind);
-      if (c.length() && discord_move_channel(r->channel_id, c)) moved++;
-    }
-    set_bootstrap_done();
-    Serial.printf("[admin] first-run tidy: moved %d channel(s)\n", moved);
-  }
   return true;
 }
 
@@ -670,9 +693,8 @@ void admin_sync_after_mesh() {
     String key = String((int)i);
     if (route_find(ROUTE_CHANNEL, key)) continue;
 
-    String id = discord_create_channel(cname,
-                                       "MeshCore channel " + key + " (" + cname + ")",
-                                       admin_category_for(ROUTE_CHANNEL));
+    String id = admin_create_channel(ROUTE_CHANNEL, cname,
+                                     "MeshCore channel " + key + " (" + cname + ")");
     if (id.length()) {
       route_put(ROUTE_CHANNEL, key, id, cname);
       created++;
@@ -720,9 +742,6 @@ String admin_rediscover() {
   g_settings.inbox_channel = "";
   settings_save();
   routes_clear();
-
-  // Clear the first-run marker so the adopt-existing sweep runs again.
-  { Preferences p; p.begin("meshy", false); p.putBool("boot_done", false); p.end(); }
 
   // Drop cached category ids: the categories may have been deleted by hand.
   g_cat_admin = ""; g_cat_chan = ""; g_cat_room = ""; g_cat_dm = "";
