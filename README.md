@@ -16,9 +16,52 @@ history and its own web console.
 Runs on a **Raspberry Pi Zero W** (ARMv6) upward — Pi Zero 2 W, Pi 2/3/4/5, and
 any amd64 or i386 Linux box.
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/cartpauj/meshycord/main/install.sh | sudo sh
+```
+
+That installs the latest release and starts it. **Run the same line again to
+update** — it always fetches the latest, and your settings, links and message
+history stay where they are.
+
+Then open `http://<the-machine>:9150` to finish setup.
+
+<details>
+<summary>What that command does, and how to pin or undo it</summary>
+
+It works out what the machine is, downloads the matching package from
+[Releases](https://github.com/cartpauj/meshycord/releases), checks it against the
+release's `SHA256SUMS`, and installs it with `dpkg` or `rpm` — falling back to the
+plain binary plus a systemd unit on distributions with neither.
+
+Reading a script before piping it into root is a good habit:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cartpauj/meshycord/main/install.sh -o install.sh
+less install.sh
+sudo sh install.sh
+```
+
+```sh
+MESHYCORD_DRY_RUN=1 sh install.sh      # say what would happen, change nothing
+MESHYCORD_VERSION=v0.0.1 sudo sh install.sh   # pin a version, or go back to one
+MESHYCORD_METHOD=tar sudo sh install.sh       # force deb | rpm | tar
+```
+
+To remove it, with the settings and history kept:
+
+```sh
+sudo apt-get remove meshycord     # or: sudo rpm -e meshycord
+```
+
+Add `sudo rm -rf /var/lib/meshycord` to delete the database too. Neither touches
+anything in Discord — for that, `/mesh reset` first.
+
+</details>
+
 ---
 
-## Install
+## Install by hand
 
 ### Debian, Ubuntu, Raspberry Pi OS
 
