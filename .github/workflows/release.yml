@@ -1,0 +1,191 @@
+# Release workflow — triggered when a tag matching v* is pushed.
+#
+# Builds MeshyCord for five Linux CPU architectures, packages each as a .deb
+# (and four of them as .rpm — the Pi Zero's ARMv6 has no realistic RPM target),
+# and uploads everything to the GitHub Release page for the tag.
+#
+# To cut a release:
+#   git tag v0.0.1
+#   git push origin v0.0.1
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write # for build-provenance attestation
+  attestations: write
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - run: go vet ./...
+      - run: go test -race ./...
+
+  build:
+    name: ${{ matrix.target.name }}
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # ARMv6 is the Pi Zero W and Pi 1. It is a hard requirement, not a
+          # nice-to-have, and it is why this project is written in Go: it is a
+          # build flag rather than a toolchain problem.
+          - { name: "amd64", goarch: "amd64", goarm: "",  deb_arch: "amd64", deb_variant: "",       rpm_arch: "x86_64"  }
+          - { name: "arm64", goarch: "arm64", goarm: "",  deb_arch: "arm64", deb_variant: "",       rpm_arch: "aarch64" }
+          - { name: "armv7", goarch: "arm",   goarm: "7", deb_arch: "armhf", deb_variant: "",       rpm_arch: "armv7hl" }
+          - { name: "armv6", goarch: "arm",   goarm: "6", deb_arch: "armhf", deb_variant: "-armv6", rpm_arch: ""        }
+          - { name: "i386",  goarch: "386",   goarm: "",  deb_arch: "i386",  deb_variant: "",       rpm_arch: "i686"    }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Resolve version
+        id: ver
+        run: |
+          # "v0.0.1" -> "0.0.1" for package metadata; the tagged form stays in
+          # ldflags so `meshycord --version` prints the canonical "v0.0.1".
+          TAG="${GITHUB_REF_NAME}"
+          echo "tag=${TAG}"        >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}"  >> "$GITHUB_OUTPUT"
+
+      - name: Build (${{ matrix.target.name }})
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.target.goarch }}
+          GOARM: ${{ matrix.target.goarm }}
+        run: |
+          # CGO_ENABLED=0 is load-bearing, not a habit: it is what makes every
+          # dependency pure Go and every binary static. modernc.org/sqlite was
+          # chosen over mattn/go-sqlite3 for exactly this reason — cgo would
+          # need a cross-toolchain per architecture and would make the ARMv6
+          # build painful instead of a flag.
+          mkdir -p out
+          go build \
+            -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.tag }}" \
+            -trimpath \
+            -o out/meshycord \
+            ./cmd/meshycord
+          file out/meshycord
+          ls -la out/
+
+      - name: Install nfpm
+        run: |
+          NFPM_VERSION=2.46.3
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | tar -xz -C /tmp nfpm
+          sudo install -m 0755 /tmp/nfpm /usr/local/bin/nfpm
+          nfpm --version
+
+      - name: Build .deb
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          ARCH: ${{ matrix.target.deb_arch }}
+          GO_BINARY: out/meshycord
+        run: |
+          # nfpm cannot template the output filename in config, so --target
+          # carries a full path when we need a custom name. ARMv6 and ARMv7
+          # share arch=armhf, so without a suffix the two .debs would collide.
+          if [ -n "${{ matrix.target.deb_variant }}" ]; then
+            TARGET="out/meshycord_${VERSION}_${ARCH}${{ matrix.target.deb_variant }}.deb"
+          else
+            TARGET="out/"
+          fi
+          nfpm package --packager deb --target "$TARGET" --config deploy/nfpm.yaml
+          ls -la out/
+
+      - name: Build .rpm
+        if: matrix.target.rpm_arch != ''
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          ARCH: ${{ matrix.target.rpm_arch }}
+          GO_BINARY: out/meshycord
+        run: |
+          nfpm package --packager rpm --target out/ --config deploy/nfpm.yaml
+          ls -la out/
+
+      - name: Package the bare binary
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          # For anyone not on a systemd distro, or who just wants the binary.
+          tar -C out -czf "out/meshycord_${VERSION}_linux_${{ matrix.target.name }}.tar.gz" meshycord
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: meshycord-${{ matrix.target.name }}
+          path: |
+            out/meshycord_*.deb
+            out/meshycord-*.rpm
+            out/meshycord_*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release files
+        run: ls -la dist/
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest provenance
+        # Proves these artifacts came from this exact workflow run on this
+        # commit. Free for public repos, and no GPG key to manage.
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/meshycord_*.deb
+            dist/meshycord-*.rpm
+            dist/meshycord_*.tar.gz
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: MeshyCord ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/meshycord_*.deb
+            dist/meshycord-*.rpm
+            dist/meshycord_*.tar.gz
+            dist/SHA256SUMS

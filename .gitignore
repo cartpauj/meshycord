@@ -2,15 +2,22 @@
 /meshycord
 /out/
 /dist/
+meshycord_*.deb
+meshycord-*.rpm
+meshycord_*.tar.gz
 
 # Go
 *.test
 /vendor/
+coverage.out
+*.cover.out
 
 # Editor and OS noise
 .vscode/
 .idea/
 .DS_Store
+*.swp
+*~
 
 # Planning docs stay local — working notes, not a deliverable.
 PRD.md
@@ -20,4 +27,10 @@ PRD.md
 # config or database for testing, exclude it here.
 *.sqlite
 *.sqlite-*
-*.conf
+.env
+.env.*
+
+# Local runtime config only. Named rather than globbed as *.conf so that a
+# committed sample or a packaging config is never silently excluded.
+/meshycord.conf
+*.local.conf

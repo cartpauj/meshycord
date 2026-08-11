@@ -1,0 +1,58 @@
+{{template "header" .}}
+<h1>Messages</h1>
+
+{{/* Real history in SQLite, which is the single biggest thing a Pi buys over
+     the ESP32: there, history was a 256-message ring on the radio and was
+     gone the moment it wrapped. */}}
+<form class="card" method="GET" action="/messages">
+  <div class="row">
+    <div>
+      <label for="q">Search</label>
+      <input type="search" id="q" name="q" value="{{.Query.Search}}" placeholder="text, sender or author">
+    </div>
+    <div>
+      <label for="kind">Kind</label>
+      <select id="kind" name="kind">
+        <option value="">any</option>
+        <option value="channel" {{if eq .Query.KindStr "channel"}}selected{{end}}>mesh channels</option>
+        <option value="dm"      {{if eq .Query.KindStr "dm"}}selected{{end}}>direct messages</option>
+        <option value="room"    {{if eq .Query.KindStr "room"}}selected{{end}}>room servers</option>
+      </select>
+    </div>
+    <div class="shrink"><button type="submit">Search</button></div>
+  </div>
+</form>
+
+<div class="card">
+  {{if not .Messages}}
+    <div class="empty">No messages match.</div>
+  {{else}}
+    {{range .Messages}}
+    <div class="msg {{.Direction}}">
+      <div class="head">
+        <span class="who">{{if .PeerLabel}}{{.PeerLabel}}{{else}}{{.MeshKey}}{{end}}</span>
+        {{if .Author}}<span class="dim">via {{.Author}}</span>{{end}}
+        <span class="dir">{{if eq .Direction "in"}}← received{{else}}→ sent{{end}}</span>
+        <span class="dim">{{kindLabel .Kind}}</span>
+        <span class="mono dim">{{.MeshKey}}</span>
+        {{if eq .Direction "in"}}<span class="dim">{{hopsText .}}</span>{{end}}
+        {{if eq .Direction "out"}}
+          <span class="{{deliveryClass .Delivery}}">{{deliveryLabel .Delivery}}</span>
+          {{if .RoundTrip}}<span class="dim">{{roundTrip .RoundTrip}}</span>{{end}}
+          {{if .DiscordUsr}}<span class="dim">by {{.DiscordUsr}}</span>{{end}}
+        {{end}}
+        {{if .ChunkTotal}}<span class="badge mute">part {{.ChunkIndex}}/{{.ChunkTotal}}</span>{{end}}
+        <span class="dim" style="margin-left:auto" title="{{stamp .CreatedAt}}">{{ago .CreatedAt}}</span>
+      </div>
+      <div class="body">{{.Body}}</div>
+    </div>
+    {{end}}
+  {{end}}
+</div>
+
+{{if .NextBefore}}
+<div class="actions">
+  <a class="btn secondary" href="/messages?q={{.Query.Search}}&kind={{.Query.KindStr}}&before={{.NextBefore}}">Older messages</a>
+</div>
+{{end}}
+{{template "footer" .}}

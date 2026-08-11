@@ -1,0 +1,102 @@
+{{template "header" .}}
+<h1>Dashboard</h1>
+
+{{/* The live region refreshes itself, so a console left open in a tab stays
+     current without anyone reloading it. Polling rather than a websocket:
+     this is a Pi, and one small request every five seconds costs less than
+     holding a second connection open. */}}
+<div hx-get="/fragment/status" hx-trigger="every 5s" hx-swap="innerHTML">
+  {{template "status-panel" .}}
+</div>
+
+<h2>Recent traffic</h2>
+<div class="card" hx-get="/fragment/recent" hx-trigger="every 5s" hx-swap="innerHTML">
+  {{template "recent-messages" .}}
+</div>
+{{template "footer" .}}
+
+
+{{define "status-panel"}}
+<div class="grid">
+  <div class="card">
+    <h3>Radio</h3>
+    <div class="stat">
+      <span class="num">
+        {{if .Status.Mesh.Connected}}<span class="badge up">connected</span>
+        {{else}}<span class="badge down">down</span>{{end}}
+      </span>
+      <span class="lbl">{{.Status.Mesh.Transport}}</span>
+    </div>
+    <dl class="kv" style="margin-top:.8rem">
+      {{if .Status.Mesh.NodeName}}<dt>node</dt><dd>{{.Status.Mesh.NodeName}}</dd>{{end}}
+      {{if .Status.Mesh.NodeKey}}<dt>key</dt><dd>{{shortKey .Status.Mesh.NodeKey}}</dd>{{end}}
+      {{with .Status.Mesh.FrequencyMHz}}<dt>frequency</dt><dd>{{.}}</dd>{{end}}
+      {{with .Status.Mesh.RadioParams}}<dt>modem</dt><dd>{{.}}</dd>{{end}}
+      <dt>contacts</dt><dd>{{.Status.Mesh.Contacts}}</dd>
+      <dt>channels</dt><dd>{{.Status.Mesh.Channels}}</dd>
+      {{if .Status.Mesh.Connected}}<dt>up since</dt><dd>{{ago .Status.Mesh.UpSince}}</dd>{{end}}
+    </dl>
+    {{if and (not .Status.Mesh.Connected) .Status.Mesh.LastError}}
+      <small>{{.Status.Mesh.LastError}}</small>
+    {{end}}
+  </div>
+
+  <div class="card">
+    <h3>Discord</h3>
+    <div class="stat">
+      <span class="num">
+        {{if .Status.DiscordUp}}<span class="badge up">connected</span>
+        {{else}}<span class="badge down">down</span>{{end}}
+      </span>
+      <span class="lbl">Gateway</span>
+    </div>
+    <dl class="kv" style="margin-top:.8rem">
+      <dt>links</dt><dd>{{.Status.Links}}</dd>
+      <dt>rooms</dt><dd>{{.Status.RoomsLoggedIn}} logged in of {{.Status.RoomsKnown}}</dd>
+      <dt>awaiting ack</dt><dd>{{.Status.PendingDelivery}}</dd>
+      {{if .Status.DiscordUp}}<dt>up since</dt><dd>{{ago .Status.DiscordSince}}</dd>{{end}}
+    </dl>
+    {{if and (not .Status.DiscordUp) .Status.DiscordError}}
+      <small>{{.Status.DiscordError}}</small>
+    {{end}}
+  </div>
+
+  <div class="card">
+    <h3>Traffic</h3>
+    <div class="stat">
+      <span class="num">{{.Status.Stats.Last24h}}</span>
+      <span class="lbl">messages in the last 24 hours</span>
+    </div>
+    <dl class="kv" style="margin-top:.8rem">
+      <dt>total</dt><dd>{{.Status.Stats.Messages}}</dd>
+      <dt>received</dt><dd>{{.Status.Stats.MessagesIn}}</dd>
+      <dt>sent</dt><dd>{{.Status.Stats.MessagesOut}}</dd>
+      <dt>delivered</dt><dd>{{.Status.Stats.Delivered}}</dd>
+      <dt>failed</dt><dd>{{.Status.Stats.Failed}}</dd>
+      {{if not .Status.LastInbound.IsZero}}<dt>last heard</dt><dd>{{ago .Status.LastInbound}}</dd>{{end}}
+    </dl>
+  </div>
+</div>
+{{end}}
+
+
+{{define "recent-messages"}}
+{{if not .Messages}}
+  <div class="empty">Nothing yet. Messages appear here as soon as the radio hears one.</div>
+{{else}}
+  {{range .Messages}}
+  <div class="msg {{.Direction}}">
+    <div class="head">
+      <span class="who">{{if .PeerLabel}}{{.PeerLabel}}{{else}}{{.MeshKey}}{{end}}</span>
+      {{if .Author}}<span class="dim">via {{.Author}}</span>{{end}}
+      <span class="dir">{{if eq .Direction "in"}}← received{{else}}→ sent{{end}}</span>
+      <span class="dim">{{kindLabel .Kind}}</span>
+      {{if eq .Direction "in"}}<span class="dim">{{hopsText .}}</span>{{end}}
+      {{if eq .Direction "out"}}<span class="{{deliveryClass .Delivery}}">{{deliveryLabel .Delivery}}</span>{{end}}
+      <span class="dim" style="margin-left:auto">{{ago .CreatedAt}}</span>
+    </div>
+    <div class="body">{{.Body}}</div>
+  </div>
+  {{end}}
+{{end}}
+{{end}}

@@ -1,0 +1,164 @@
+{{template "header" .}}
+<h1>Settings</h1>
+
+<form method="POST" action="/settings/save">
+{{$.CSRF}}
+
+<div class="card">
+  <h2>Discord</h2>
+  <label for="token">Bot token</label>
+  <input type="password" id="token" name="token" autocomplete="off"
+         placeholder="{{if .HasToken}}unchanged{{else}}required{{end}}">
+  <small>Never displayed back. Leave blank to keep the stored one.</small>
+
+  <label for="guild">Server (guild) ID</label>
+  <input type="text" id="guild" name="guild" value="{{.Cfg.GuildID}}">
+  <small>Open any channel in your server; the first long number in the browser URL is the server ID.
+    Every channel and category is created for you.</small>
+
+  <h3>Bot setup checklist</h3>
+  <p class="faint">In the Discord Developer Portal, the bot needs
+    <strong>Message Content Intent</strong> turned on, <strong>Public Bot</strong> turned off, and
+    these permissions: View Channels, Send Messages, Read Message History, Manage Channels,
+    Manage Messages.</p>
+</div>
+
+<div class="card">
+  <h2>Radio link</h2>
+  <label for="transport">Connection</label>
+  <select id="transport" name="transport">
+    <option value="serial" {{if eq .Cfg.Transport "serial"}}selected{{end}}>USB serial (recommended)</option>
+    <option value="ble"    {{if eq .Cfg.Transport "ble"}}selected{{end}}>Bluetooth LE</option>
+    <option value="tcp"    {{if eq .Cfg.Transport "tcp"}}selected{{end}}>TCP (WiFi companion firmware)</option>
+  </select>
+  <small>If this box sits next to the radio, USB serial is the most reliable option: no pairing,
+    no PIN, no bonding, and no dropped links.</small>
+
+  <h3>USB serial</h3>
+  <label for="serial_device">Device</label>
+  <select id="serial_device" name="serial_device">
+    <option value="">auto-detect</option>
+    {{range .SerialPorts}}
+      <option value="{{.}}" {{if eq $.Cfg.SerialDevice .}}selected{{end}}>{{.}}</option>
+    {{end}}
+    {{if and .Cfg.SerialDevice (not (portListed .SerialPorts .Cfg.SerialDevice))}}
+      <option value="{{.Cfg.SerialDevice}}" selected>{{.Cfg.SerialDevice}} (not present)</option>
+    {{end}}
+  </select>
+  <small>{{if .SerialPorts}}Prefer a <code>/dev/serial/by-id/</code> entry: it survives reboots and
+    does not shuffle when another USB device appears.{{else}}No serial devices found right now.{{end}}</small>
+
+  <label for="serial_baud">Baud rate</label>
+  <input type="number" id="serial_baud" name="serial_baud" value="{{.Cfg.SerialBaud}}" min="9600" max="921600">
+  <small>Ignored by USB CDC-ACM devices, which have no baud rate. Matters only for a real UART.</small>
+
+  <h3>Bluetooth LE</h3>
+  <label for="ble_name">Device name contains</label>
+  <input type="text" id="ble_name" name="ble_name" value="{{.Cfg.BLEName}}">
+  <small>Blank matches the first device advertising the MeshCore service.</small>
+
+  <label for="ble_addr">MAC address (optional)</label>
+  <input type="text" id="ble_addr" name="ble_addr" value="{{.Cfg.BLEAddress}}" placeholder="AA:BB:CC:DD:EE:FF">
+  <small>Wins over the name when set.</small>
+
+  <label for="ble_pin">Pairing PIN</label>
+  <input type="text" id="ble_pin" name="ble_pin" value="{{.Cfg.BLEPin}}" placeholder="123456" inputmode="numeric">
+  <small><strong>The node must have a fixed PIN set</strong> in the MeshCore phone app. Without one it
+    generates a random PIN each boot and shows it on its screen, which a headless bridge cannot read.
+    MeshCore's own default is 123456.</small>
+
+  <h3>TCP</h3>
+  <label for="tcp_addr">Companion address</label>
+  <input type="text" id="tcp_addr" name="tcp_addr" value="{{.Cfg.TCPAddress}}" placeholder="192.168.1.50:5000">
+  <small>For MeshCore's WiFi companion firmware. Port 5000 is assumed if you leave it off.</small>
+</div>
+
+<div class="card">
+  <h2>Policy</h2>
+  <p class="faint">What the bridge is allowed to create in Discord without being asked.</p>
+
+  <label class="inline">
+    <input type="checkbox" name="auto_channels" value="1" {{if .Cfg.AutoCreateChannels}}checked{{end}}>
+    Give every mesh channel its own Discord channel
+  </label>
+  <small>Safe: your node's channels are already yours, so there is no abuse surface here.</small>
+
+  <label class="inline">
+    <input type="checkbox" name="auto_rooms" value="1" {{if .Cfg.AutoCreateRooms}}checked{{end}}>
+    Give every room server its own Discord channel
+  </label>
+  <small>Off by default: there are often dozens, which fills a server and hits Discord's
+    50-channels-per-category limit.</small>
+
+  <label class="inline">
+    <input type="checkbox" name="auto_dms" value="1" {{if .Cfg.AutoCreateDMs}}checked{{end}}>
+    Give every direct message its own Discord channel
+  </label>
+  <small>The riskiest of the three: anyone who has heard your advert can send you a direct message.
+    Even when this is on, it only fires for senders already in the radio's contact list — an unknown
+    sender always goes to the inbox, which is the guard that makes the whole policy safe.</small>
+
+  <label for="max_chunks">Maximum transmissions per message</label>
+  <input type="number" id="max_chunks" name="max_chunks" value="{{.Cfg.MaxChunks}}" min="1" max="10">
+  <small>A mesh message is 133 bytes; longer text is split. Anything needing more transmissions than
+    this is refused rather than truncated — truncating looked like it sent, which was worse.
+    At {{.Cfg.MaxChunks}} that is about {{.ChunkCapacity}} characters of plain text.</small>
+
+  <label for="chunk_gap">Pause between transmissions (ms)</label>
+  <input type="number" id="chunk_gap" name="chunk_gap" value="{{.ChunkGapMS}}" min="0" max="30000">
+  <small>Airtime is shared with everybody else on the mesh.</small>
+
+  <label for="room_session">Trust a room-server login for (seconds)</label>
+  <input type="number" id="room_session" name="room_session" value="{{.RoomSessionSeconds}}" min="0" max="3600">
+  <small>Room servers silently discard posts from anyone whose session has lapsed, and never say
+    how long a session lasts — so the bridge logs in again once this window passes.
+    <strong>0 logs in before every message</strong>: the most reliable setting, and it costs a full
+    round trip over the air per post, which roughly doubles the airtime a room conversation uses.</small>
+
+  <label for="retention">Keep message history for (days)</label>
+  <input type="number" id="retention" name="retention" value="{{.RetentionDays}}" min="0" max="3650">
+  <small>0 keeps everything. History lives on the SD card, so a bound is worth having.</small>
+</div>
+
+<div class="card" id="account">
+  <h2>Console login</h2>
+  <label for="username">Username</label>
+  <input type="text" id="username" name="username" value="{{.Cfg.Username}}">
+
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" autocomplete="new-password"
+         placeholder="{{if .HasPassword}}unchanged{{else}}STRONGLY recommended{{end}}">
+  <small>This page holds your bot token and every room password. At least 8 characters.
+    Changing it signs out every other session.</small>
+</div>
+
+<div class="actions">
+  <button type="submit">Save settings</button>
+</div>
+</form>
+
+<div class="card">
+  <h2>Danger zone</h2>
+  <p class="faint">
+    Reset deletes every channel the bridge created — all linked channels, the Channels / Room Servers
+    / Companion DMs categories, and the inbox — and clears every link. Channels you made yourself are
+    untouched.
+  </p>
+  <form method="POST" action="/settings/reset"
+        onsubmit="return confirm('Delete every channel the bridge created and clear every link?')">
+    {{$.CSRF}}<button class="danger" type="submit">Reset the Discord side</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>System</h2>
+  <dl class="kv">
+    <dt>version</dt><dd>{{.Version}}</dd>
+    <dt>database</dt><dd>{{.DBPath}}</dd>
+    <dt>database size</dt><dd>{{bytes .Status.Stats.DBBytes}}</dd>
+    <dt>messages stored</dt><dd>{{.Status.Stats.Messages}}</dd>
+    {{if not .Status.Stats.Oldest.IsZero}}<dt>oldest message</dt><dd>{{stamp .Status.Stats.Oldest}}</dd>{{end}}
+    <dt>uptime</dt><dd>{{.UptimeText}}</dd>
+  </dl>
+</div>
+{{template "footer" .}}

@@ -1,0 +1,36 @@
+{{template "header" .}}
+<h1>Activity</h1>
+
+<p class="faint">
+  What the bridge has done to your Discord server and your radio. Kept so that
+  "why does this channel exist" has an answer months later. Everything else goes to the
+  system journal — <code>journalctl -u meshycord -f</code>.
+</p>
+
+<div class="card" hx-get="/fragment/events" hx-trigger="every 10s" hx-swap="innerHTML">
+  {{template "event-list" .}}
+</div>
+{{template "footer" .}}
+
+
+{{define "event-list"}}
+{{if not .Events}}
+  <div class="empty">Nothing recorded yet.</div>
+{{else}}
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>When</th><th>Level</th><th>Source</th><th>What happened</th></tr></thead>
+    <tbody>
+    {{range .Events}}
+      <tr>
+        <td class="dim" title="{{stamp .CreatedAt}}">{{ago .CreatedAt}}</td>
+        <td><span class="badge {{levelClass .Level}}">{{.Level}}</span></td>
+        <td class="dim">{{.Source}}</td>
+        <td>{{.Message}}</td>
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+{{end}}

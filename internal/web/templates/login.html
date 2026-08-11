@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · MeshyCord</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+<div class="login-wrap">
+  <h1>MeshyCord</h1>
+  {{if .Error}}<div class="banner bad">{{.Error}}</div>{{end}}
+  <form class="card" method="POST" action="/login">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" autocomplete="current-password" required>
+    <div class="actions"><button type="submit">Sign in</button></div>
+  </form>
+  {{/* bcrypt at cost 10 takes several seconds on an ARMv6 Pi Zero. That is the
+       point of a slow hash, but a user staring at an unresponsive button
+       deserves to know it is working rather than broken. */}}
+  <p class="faint">On a Pi Zero, signing in takes a few seconds — the password hash is deliberately slow.</p>
+</div>
+</main>
+</body>
+</html>

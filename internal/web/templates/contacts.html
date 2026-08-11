@@ -1,0 +1,118 @@
+{{template "header" .}}
+<h1>Contacts</h1>
+
+<p class="faint">
+  Everything the radio knows about, including repeaters and sensors. The node stays the source of
+  truth; this is a mirror, so the names are still here when the radio is unplugged.
+  {{if not .Status.Mesh.Connected}}<strong>The radio is not connected right now.</strong>{{end}}
+</p>
+
+<form class="card" method="GET" action="/contacts">
+  <div class="row">
+    <div>
+      <label for="q">Search</label>
+      <input type="search" id="q" name="q" value="{{.Filter}}" placeholder="name or key prefix">
+    </div>
+    <div>
+      <label for="type">Type</label>
+      <select id="type" name="type">
+        <option value="">all</option>
+        <option value="1" {{if eq .TypeStr "1"}}selected{{end}}>companions</option>
+        <option value="3" {{if eq .TypeStr "3"}}selected{{end}}>room servers</option>
+        <option value="2" {{if eq .TypeStr "2"}}selected{{end}}>repeaters</option>
+        <option value="4" {{if eq .TypeStr "4"}}selected{{end}}>sensors</option>
+      </select>
+    </div>
+    <div class="shrink"><button type="submit">Search</button></div>
+  </div>
+</form>
+
+{{/* Its own form: a <form> cannot legally be nested inside another one, and
+     browsers silently drop the inner one rather than warning about it. */}}
+<form method="POST" action="/contacts/refresh" class="actions" style="margin-top:-.5rem">
+  {{$.CSRF}}<button class="secondary" type="submit">Re-read from radio</button>
+</form>
+
+<div class="card">
+  <p class="faint">{{len .Contacts}} shown</p>
+  {{if not .Contacts}}
+    <div class="empty">Nothing matches. If this is empty entirely, the radio has not been read yet.</div>
+  {{else}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Name</th><th>Type</th><th>Key prefix</th><th>Path</th><th>Last heard</th>
+        <th>Position</th><th></th>
+      </tr></thead>
+      <tbody>
+      {{range .Contacts}}
+        <tr>
+          <td>{{if .Name}}{{.Name}}{{else}}<span class="dim">unnamed</span>{{end}}</td>
+          <td>{{advType .Type}}</td>
+          <td class="mono" title="{{.PubKey}}">{{.Prefix}}</td>
+          <td class="dim">{{hopsLabel .OutPathLen}}</td>
+          <td class="dim">{{if .LastAdvert.IsZero}}never{{else}}{{ago .LastAdvert}}{{end}}</td>
+          <td class="dim mono">{{if or .Lat .Lon}}{{printf "%.4f, %.4f" .Lat .Lon}}{{else}}—{{end}}</td>
+          <td>
+            <form method="POST" action="/contacts/remove"
+                  onsubmit="return confirm('Delete this contact from the radio? It comes back if that node adverts again.')">
+              {{$.CSRF}}
+              <input type="hidden" name="key" value="{{.PubKey}}">
+              <button class="secondary small" type="submit" {{if not $.Status.Mesh.Connected}}disabled{{end}}>Remove</button>
+            </form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+</div>
+
+<h2>Add a contact by public key</h2>
+<div class="card">
+  <p class="faint">
+    For a node seen on the public map whose adverts never reach you. Needs the full 64-character
+    key — the 12-character prefix shown next to a message is not enough.
+  </p>
+  <form method="POST" action="/contacts/add">
+    {{$.CSRF}}
+    <div class="row">
+      <div style="flex:2 1 24rem">
+        <label for="key">Public key</label>
+        <input type="text" id="key" name="key" placeholder="64 hex characters" required>
+      </div>
+      <div>
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" placeholder="What to call it" required>
+      </div>
+      <div class="shrink">
+        <label class="inline"><input type="checkbox" name="room" value="1"> Room server</label>
+      </div>
+      <div class="shrink"><button type="submit" {{if not .Status.Mesh.Connected}}disabled{{end}}>Add</button></div>
+    </div>
+  </form>
+</div>
+
+<h2>Mesh channels on the radio</h2>
+<div class="card">
+  {{if not .Channels}}
+    <div class="empty">No channels read from the radio yet.</div>
+  {{else}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Slot</th><th>Name</th><th>Linked</th></tr></thead>
+      <tbody>
+      {{range .Channels}}
+        <tr>
+          <td class="mono">{{.Index}}</td>
+          <td>{{.Name}}</td>
+          <td>{{if channelLinked .Index}}<span class="badge up">yes</span>{{else}}<span class="badge mute">no</span>{{end}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+</div>
+{{template "footer" .}}

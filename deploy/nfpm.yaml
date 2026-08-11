@@ -1,0 +1,89 @@
+# nfpm config — produces .deb and .rpm packages for MeshyCord.
+#
+# CI (.github/workflows/release.yml) exports three env vars before running:
+#
+#   VERSION    — e.g. "0.0.1" (git tag minus the leading "v")
+#   ARCH       — Debian arch name: amd64, arm64, armhf, i386
+#                For ARMv6 (Pi Zero / Pi 1) a SECOND armhf .deb ships with a
+#                custom filename suffix, because nfpm's output filename is not
+#                templatable in config — the workflow controls it with
+#                `--target <path>` instead.
+#   GO_BINARY  — path to the pre-built static binary for that arch
+#
+# nfpm expands ${VAR} natively in most top-level fields. contents[] entries need
+# `expand: true` per entry — without it the literal ${...} survives into the
+# package and the glob fails.
+#
+# Run as:
+#   nfpm package --packager deb --target <out-path-or-dir> --config deploy/nfpm.yaml
+
+name: meshycord
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+# RPM-only packaging-iteration counter. RPM filenames embed it as
+# `meshycord-<version>-<release>.<arch>.rpm`. Pinned so get.sh can build
+# deterministic download URLs.
+release: "1"
+section: hamradio
+priority: optional
+maintainer: cartpauj <cartpauj@users.noreply.github.com>
+description: |
+  MeshCore ↔ Discord bridge in a single Go binary.
+  Messages from a LoRa mesh appear in Discord channels; replies typed in
+  Discord go back out over the radio. One process owns the radio link, the
+  Discord Gateway, the routing, the message history and the web console —
+  no separate daemon, no log tailing, no IPC. Talks to a MeshCore companion
+  over USB serial, Bluetooth LE, or TCP.
+homepage: https://github.com/cartpauj/meshycord
+license: GPL-3.0-or-later
+
+# The binary is fully static with no shared-library dependencies. BlueZ is only
+# needed for the Bluetooth transport, which is not the recommended default —
+# so it is a suggestion rather than a hard dependency, and a serial-only
+# install pulls in nothing at all.
+suggests:
+  - bluez
+
+contents:
+  - src: ${GO_BINARY}
+    dst: /usr/bin/meshycord
+    expand: true
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # /usr/lib/systemd/system is the upstream location, used by Fedora and by
+  # Debian 12+ / Ubuntu 22.04+ where /lib/systemd/system is a usrmerge symlink.
+  # One path serves both package formats.
+  - src: deploy/meshycord.service
+    dst: /usr/lib/systemd/system/meshycord.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: README.md
+    dst: /usr/share/doc/meshycord/README.md
+    file_info:
+      mode: 0644
+
+  - src: PROTOCOL-NOTES.md
+    dst: /usr/share/doc/meshycord/PROTOCOL-NOTES.md
+    file_info:
+      mode: 0644
+
+  # The state directory holds the database, which holds the bot token and every
+  # room-server password. 0700 from the moment it exists.
+  - dst: /var/lib/meshycord
+    type: dir
+    file_info:
+      mode: 0700
+      owner: root
+      group: root
+
+scripts:
+  postinstall: deploy/postinst.sh
+  preremove: deploy/prerm.sh
+  postremove: deploy/postrm.sh

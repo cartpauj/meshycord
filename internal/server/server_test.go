@@ -1,0 +1,387 @@
+package server
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"meshycord/internal/bridge"
+	"meshycord/internal/config"
+	"meshycord/internal/meshcore"
+	"meshycord/internal/store"
+)
+
+// A page that renders fine when empty can still blow up the moment there is a
+// row in it — a template error inside a {{range}} only fires when the range
+// has something to iterate. So every fixture below is populated.
+func newTestServer(t *testing.T) (*Server, *store.Store, *config.Store) {
+	t.Helper()
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	cfg, err := config.New(db)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+
+	// The console sections that are switched off by default in production are
+	// switched ON here, so their handlers and templates stay exercised while
+	// they are hidden. TestHiddenSectionsAreNotRouted covers the real default.
+	ShowLinks, ShowMessages, ShowContacts = true, true, true
+	t.Cleanup(func() { ShowLinks, ShowMessages, ShowContacts = false, false, false })
+
+	br := bridge.New(cfg, db, discardLogger())
+	srv, err := New(Options{
+		Listen:  "127.0.0.1:0",
+		DBPath:  filepath.Join(t.TempDir(), "test.sqlite"),
+		Version: "test",
+	}, cfg, db, br, discardLogger())
+	if err != nil {
+		t.Fatalf("server: %v", err)
+	}
+	return srv, db, cfg
+}
+
+func seed(t *testing.T, db *store.Store) {
+	t.Helper()
+
+	for _, r := range []struct {
+		kind  store.RouteKind
+		key   string
+		label string
+	}{
+		{store.KindChannel, "0", "Public"},
+		{store.KindRoom, "aabbccddeeff", "Ridge Room"},
+		{store.KindDM, "112233445566", "Alice"},
+	} {
+		if _, err := db.PutRoute(r.kind, r.key, "chan-"+r.key, r.label); err != nil {
+			t.Fatalf("put route: %v", err)
+		}
+	}
+	if err := db.SetRoomPassword("aabbccddeeff", "hunter2"); err != nil {
+		t.Fatalf("room password: %v", err)
+	}
+
+	contacts := []store.Contact{
+		{PubKey: strings.Repeat("aa", 32), Prefix: "aaaaaaaaaaaa", Type: meshcore.AdvTypeChat,
+			Name: "Alice", OutPathLen: 2, LastAdvert: time.Now().Add(-time.Hour), Lat: 45.1, Lon: -122.9},
+		{PubKey: strings.Repeat("bb", 32), Prefix: "bbbbbbbbbbbb", Type: meshcore.AdvTypeRoom,
+			Name: "Ridge Room", OutPathLen: 255},
+		{PubKey: strings.Repeat("cc", 32), Prefix: "cccccccccccc", Type: meshcore.AdvTypeRepeater,
+			Name: "Hilltop 🏔", OutPathLen: 1, LastAdvert: time.Now()},
+		{PubKey: strings.Repeat("dd", 32), Prefix: "dddddddddddd", Type: meshcore.AdvTypeSensor, Name: ""},
+	}
+	if err := db.ReplaceContacts(contacts); err != nil {
+		t.Fatalf("contacts: %v", err)
+	}
+
+	// One message of every shape the templates branch on.
+	msgs := []store.Message{
+		{Direction: "in", Kind: store.KindChannel, MeshKey: "0", PeerLabel: "Public",
+			Body: "hello from the mesh", HaveHops: true, Hops: 3, HaveSNR: true, SNR: -7.25,
+			Delivery: store.DeliveryReceived},
+		{Direction: "in", Kind: store.KindRoom, MeshKey: "aabbccddeeff", PeerLabel: "Ridge Room",
+			Author: "Bob", Body: "a room post", HaveHops: false, PathRaw: 255,
+			Delivery: store.DeliveryReceived},
+		{Direction: "out", Kind: store.KindDM, MeshKey: "112233445566", PeerLabel: "Alice",
+			Body: "on my way", Delivery: store.DeliveryDelivered, RoundTrip: 8500 * time.Millisecond,
+			DiscordUsr: "cartpauj"},
+		{Direction: "out", Kind: store.KindChannel, MeshKey: "0", PeerLabel: "Public",
+			Body: "[1/2] a split message", Delivery: store.DeliveryTransmitted,
+			ChunkIndex: 1, ChunkTotal: 2},
+		{Direction: "out", Kind: store.KindDM, MeshKey: "112233445566", PeerLabel: "Alice",
+			Body: "never arrived", Delivery: store.DeliveryFailed},
+		{Direction: "out", Kind: store.KindRoom, MeshKey: "aabbccddeeff", PeerLabel: "Ridge Room",
+			Body: "too long to send", Delivery: store.DeliveryRefused},
+		{Direction: "out", Kind: store.KindDM, MeshKey: "112233445566", PeerLabel: "Alice",
+			Body: "waiting", Delivery: store.DeliveryPending, Ack: 1234},
+	}
+	for _, m := range msgs {
+		if _, err := db.InsertMessage(m); err != nil {
+			t.Fatalf("insert message: %v", err)
+		}
+	}
+
+	db.LogEvent("info", "admin", "linked room aabbccddeeff")
+	db.LogEvent("warn", "mesh", "link to the node went down")
+	db.LogEvent("error", "discord", "setup failed: no server id")
+}
+
+func get(t *testing.T, h http.Handler, path string) (int, string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Result().Body)
+	return rec.Code, string(body)
+}
+
+func TestEveryPageRendersWithData(t *testing.T) {
+	srv, db, _ := newTestServer(t)
+	seed(t, db)
+	h := srv.Handler()
+
+	for _, tc := range []struct {
+		path     string
+		contains []string
+	}{
+		{"/", []string{"Dashboard", "hello from the mesh", "3 hops", "snr -7.2"}},
+		{"/messages", []string{"Messages", "a room post", "via known path", "delivered",
+			"transmitted", "failed", "refused", "awaiting ack", "part 1/2", "via Bob"}},
+		{"/links", []string{"Links", "Ridge Room", "aabbccddeeff", "mesh channel",
+			"room server", "password stored"}},
+		{"/contacts", []string{"Contacts", "Alice", "Hilltop 🏔", "repeater", "sensor",
+			"companion", "45.1000, -122.9000", "unnamed"}},
+		{"/logs", []string{"Activity", "linked room", "went down", "setup failed"}},
+		{"/settings", []string{"Settings", "Bot token", "Radio link", "Pairing PIN",
+			"Console login", "Danger zone"}},
+		{"/fragment/status", []string{"Radio", "Discord", "Traffic"}},
+		{"/fragment/recent", []string{"hello from the mesh"}},
+		{"/fragment/events", []string{"linked room"}},
+		{"/login", []string{"Sign in"}},
+		{"/healthz", []string{"ok"}},
+	} {
+		code, body := get(t, h, tc.path)
+		if code != http.StatusOK {
+			t.Errorf("GET %s = %d", tc.path, code)
+			continue
+		}
+		for _, want := range tc.contains {
+			if !strings.Contains(body, want) {
+				t.Errorf("GET %s: missing %q", tc.path, want)
+			}
+		}
+		// html/template writes what it has and then stops on an error, so a
+		// broken template shows up as a page that never reaches its footer.
+		if tc.path != "/healthz" && tc.path != "/login" && !strings.HasPrefix(tc.path, "/fragment") {
+			if !strings.Contains(body, "</html>") {
+				t.Errorf("GET %s: page is truncated — a template failed mid-render", tc.path)
+			}
+		}
+	}
+}
+
+func TestMessageFiltersAndPaging(t *testing.T) {
+	srv, db, _ := newTestServer(t)
+	seed(t, db)
+	h := srv.Handler()
+
+	code, body := get(t, h, "/messages?kind=room")
+	if code != http.StatusOK {
+		t.Fatalf("status %d", code)
+	}
+	if !strings.Contains(body, "a room post") {
+		t.Error("room filter dropped a room message")
+	}
+	if strings.Contains(body, "hello from the mesh") {
+		t.Error("room filter let a channel message through")
+	}
+
+	_, body = get(t, h, "/messages?q=never")
+	if !strings.Contains(body, "never arrived") {
+		t.Error("search did not find a message by body text")
+	}
+	if strings.Contains(body, "on my way") {
+		t.Error("search returned a message it should not have")
+	}
+
+	// An unknown kind must be ignored rather than returning nothing.
+	_, body = get(t, h, "/messages?kind=nonsense")
+	if !strings.Contains(body, "on my way") {
+		t.Error("an invalid kind filter hid everything")
+	}
+}
+
+func TestContactFilters(t *testing.T) {
+	srv, db, _ := newTestServer(t)
+	seed(t, db)
+	h := srv.Handler()
+
+	_, body := get(t, h, "/contacts?type=2")
+	if !strings.Contains(body, "Hilltop") {
+		t.Error("repeater filter dropped the repeater")
+	}
+	if strings.Contains(body, ">Alice<") {
+		t.Error("repeater filter let a companion through")
+	}
+
+	_, body = get(t, h, "/contacts?q=alice")
+	if !strings.Contains(body, "Alice") {
+		t.Error("name search failed")
+	}
+}
+
+// The console holds the bot token. It must never render back to a browser.
+func TestBotTokenIsNeverRendered(t *testing.T) {
+	srv, db, cfg := newTestServer(t)
+	seed(t, db)
+	const token = "MTIzNDU2Nzg5.SECRET.TOKENVALUE"
+	if err := cfg.SetBotToken(token); err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	for _, path := range []string{"/", "/settings", "/links", "/contacts", "/messages", "/logs"} {
+		_, body := get(t, h, path)
+		if strings.Contains(body, token) {
+			t.Errorf("GET %s leaked the bot token", path)
+		}
+	}
+	// The room password must not leak either.
+	_, body := get(t, h, "/links")
+	if strings.Contains(body, "hunter2") {
+		t.Error("/links leaked a stored room password")
+	}
+}
+
+func TestAuthIsOptionalUntilAPasswordIsSet(t *testing.T) {
+	srv, db, cfg := newTestServer(t)
+	seed(t, db)
+	h := srv.Handler()
+
+	// Fresh install: reachable, with a banner saying why that is a problem.
+	code, body := get(t, h, "/links")
+	if code != http.StatusOK {
+		t.Fatalf("a fresh install should be reachable, got %d", code)
+	}
+	if !strings.Contains(body, "no password") {
+		t.Error("the missing-password banner is not shown")
+	}
+
+	if err := cfg.SetPassword("a-long-enough-password"); err != nil {
+		t.Fatal(err)
+	}
+	code, _ = get(t, h, "/links")
+	if code != http.StatusFound {
+		t.Errorf("with a password set, an anonymous request got %d, want a redirect", code)
+	}
+}
+
+func TestPostsRequireACSRFToken(t *testing.T) {
+	srv, db, _ := newTestServer(t)
+	seed(t, db)
+	h := srv.Handler()
+
+	post := func(path string, form url.Values) int {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	for _, path := range []string{
+		"/links/unlink", "/links/tidy", "/contacts/add", "/contacts/remove", "/settings/save",
+	} {
+		if code := post(path, url.Values{"csrf": {"wrong"}}); code != http.StatusForbidden {
+			t.Errorf("POST %s with a bad token = %d, want 403", path, code)
+		}
+		if code := post(path, url.Values{}); code != http.StatusForbidden {
+			t.Errorf("POST %s with no token = %d, want 403", path, code)
+		}
+	}
+
+	// A GET on a POST-only route must not act.
+	req := httptest.NewRequest(http.MethodGet, "/settings/reset", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /settings/reset = %d, want 405", rec.Code)
+	}
+}
+
+func TestUnlinkThroughTheConsole(t *testing.T) {
+	srv, db, _ := newTestServer(t)
+	seed(t, db)
+	h := srv.Handler()
+
+	// Take a real token off a rendered page, exactly as a browser would.
+	req := httptest.NewRequest(http.MethodGet, "/links", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Result().Body)
+	token := extractCSRF(string(body))
+	if token == "" {
+		t.Fatal("no CSRF token in the rendered page")
+	}
+
+	form := url.Values{"csrf": {token}, "kind": {"room"}, "key": {"aabbccddeeff"}}
+	req = httptest.NewRequest(http.MethodPost, "/links/unlink", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("unlink returned %d", rec.Code)
+	}
+
+	if _, err := db.Route(store.KindRoom, "aabbccddeeff"); err == nil {
+		t.Error("the link is still there after unlinking")
+	}
+	// Unlinking a room server must not leave its password behind.
+	if db.HasRoomPassword("aabbccddeeff") {
+		t.Error("the stored room password survived the unlink")
+	}
+}
+
+func extractCSRF(body string) string {
+	const marker = `name="csrf" value="`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(marker):]
+	j := strings.Index(rest, `"`)
+	if j < 0 {
+		return ""
+	}
+	return rest[:j]
+}
+
+// discardLogger keeps test output readable; the bridge logs a lot at startup.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// Links, message history and contacts are managed from the Discord admin
+// channel. They must be genuinely unreachable in the console, not merely
+// unlinked in the nav.
+func TestHiddenSectionsAreNotRouted(t *testing.T) {
+	srv, db, _ := newTestServer(t)
+	ShowLinks, ShowMessages, ShowContacts = false, false, false
+	seed(t, db)
+	h := srv.Handler()
+
+	for _, path := range []string{
+		"/links", "/links/add", "/links/unlink", "/links/tidy", "/links/rediscover",
+		"/messages",
+		"/contacts", "/contacts/add", "/contacts/remove", "/contacts/refresh",
+	} {
+		if code, _ := get(t, h, path); code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404 while the section is switched off", path, code)
+		}
+	}
+
+	// What remains must still work, and must not advertise what is gone.
+	for _, path := range []string{"/", "/logs", "/settings"} {
+		code, body := get(t, h, path)
+		if code != http.StatusOK {
+			t.Errorf("GET %s = %d", path, code)
+			continue
+		}
+		for _, gone := range []string{`href="/links"`, `href="/messages"`, `href="/contacts"`} {
+			if strings.Contains(body, gone) {
+				t.Errorf("GET %s still links to %s", path, gone)
+			}
+		}
+	}
+}

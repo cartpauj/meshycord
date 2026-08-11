@@ -1,0 +1,67 @@
+{{define "header"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{.Title}} · MeshyCord</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a href="/" class="brand">
+      {{/* The dot is the whole status at a glance: green only when BOTH the
+           radio and Discord are up, because either one being down means
+           messages are not moving. */}}
+      <span class="brand-dot {{if and .Status.Mesh.Connected .Status.DiscordUp}}up{{else}}down{{end}}"></span>
+      <span>MeshyCord</span>
+    </a>
+    <nav>
+      <a href="/"         {{if eq .Title "Dashboard"}}aria-current="page"{{end}}>Dashboard</a>
+      {{if .ShowMessages}}<a href="/messages" {{if eq .Title "Messages"}}aria-current="page"{{end}}>Messages</a>{{end}}
+      {{if .ShowLinks}}<a href="/links"    {{if eq .Title "Links"}}aria-current="page"{{end}}>Links</a>{{end}}
+      {{if .ShowContacts}}<a href="/contacts" {{if eq .Title "Contacts"}}aria-current="page"{{end}}>Contacts</a>{{end}}
+      <a href="/logs"     {{if eq .Title "Activity"}}aria-current="page"{{end}}>Activity</a>
+      <a href="/settings" {{if eq .Title "Settings"}}aria-current="page"{{end}}>Settings</a>
+      <a href="/logout">Sign out</a>
+    </nav>
+  </div>
+</header>
+<main>
+{{/* Problems the operator can actually act on, shown on every page. Each of
+     these means messages are not moving, and each names its own fix. */}}
+{{if not .HasPassword}}
+<div class="banner bad">
+  <strong>This console has no password.</strong> Anyone who can reach this machine can read your
+  message history and your bot token. <a href="/settings#account">Set one now</a>.
+</div>
+{{end}}
+{{if .Status.DiscordFatal}}
+<div class="banner bad"><strong>Discord:</strong> {{.Status.DiscordFatal}}</div>
+{{end}}
+{{if .Status.AuthFailed}}
+<div class="banner bad">
+  <strong>Discord rejected the bot token.</strong> Check it in <a href="/settings">Settings</a> —
+  it may have been regenerated.
+</div>
+{{end}}
+{{if .Missing}}
+<div class="banner warn">
+  <strong>Setup is not finished.</strong> Still needed: {{range $i, $m := .Missing}}{{if $i}}, {{end}}{{$m}}{{end}}.
+  <a href="/settings">Finish setup</a>.
+</div>
+{{end}}
+{{if .Flash}}<div class="banner {{.FlashKind}}">{{.Flash}}</div>{{end}}
+{{end}}
+
+{{define "footer"}}
+</main>
+<footer>
+  MeshyCord {{.Version}} · uptime {{.UptimeText}} ·
+  <a href="https://github.com/cartpauj/meshycord">source</a> · GPL v3
+</footer>
+</body>
+</html>
+{{end}}

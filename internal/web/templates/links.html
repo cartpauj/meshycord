@@ -1,0 +1,115 @@
+{{template "header" .}}
+<h1>Links</h1>
+
+<p class="faint">
+  A link maps one mesh source to one Discord channel. Routing is always by key or channel slot,
+  never by name — so renaming a Discord channel can never break anything.
+</p>
+
+<div class="card">
+  {{if not .Routes}}
+    <div class="empty">Nothing is linked yet. Link something from the list below, or run
+      <code>/mesh link</code> in Discord.</div>
+  {{else}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>Name</th><th>Kind</th><th>Mesh key</th><th>Discord channel</th>
+        <th>Room login</th><th>Last activity</th><th></th>
+      </tr></thead>
+      <tbody>
+      {{range .Routes}}
+        <tr>
+          <td>{{if .Label}}{{.Label}}{{else}}<span class="dim">unnamed</span>{{end}}</td>
+          <td>{{kindLabel .Kind}}</td>
+          <td class="mono">{{.MeshKey}}</td>
+          <td class="mono dim">{{.ChannelID}}</td>
+          <td>
+            {{if eq (printf "%s" .Kind) "room"}}
+              {{if roomLoggedIn .MeshKey}}<span class="badge up">logged in</span>
+              {{else if roomHasPassword .MeshKey}}<span class="badge warn">password stored</span>
+              {{else}}<span class="badge down">no password</span>{{end}}
+            {{else}}<span class="dim">—</span>{{end}}
+          </td>
+          <td class="dim">{{if .LastActivity.IsZero}}never{{else}}{{ago .LastActivity}}{{end}}</td>
+          <td>
+            <form method="POST" action="/links/unlink" onsubmit="return confirm('Unlink this? The Discord channel is left in place.')">
+              {{$.CSRF}}
+              <input type="hidden" name="kind" value="{{.Kind}}">
+              <input type="hidden" name="key" value="{{.MeshKey}}">
+              <button class="secondary small" type="submit">Unlink</button>
+            </form>
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+</div>
+
+<div class="actions">
+  <form method="POST" action="/links/tidy">{{$.CSRF}}<button class="secondary" type="submit">Tidy up dead links</button></form>
+  <form method="POST" action="/links/rediscover" onsubmit="return confirm('Forget every Discord id and rebuild from scratch?')">
+    {{$.CSRF}}<button class="secondary" type="submit">Re-run Discord setup</button>
+  </form>
+</div>
+
+<h2>Link something new</h2>
+{{if not .Status.Mesh.Connected}}
+  <div class="banner warn">The radio is not connected, so this list may be stale. It comes from the
+    last successful contact sync.</div>
+{{end}}
+
+<form class="card" method="GET" action="/links">
+  <div class="row">
+    <div>
+      <label for="q">Filter</label>
+      <input type="search" id="q" name="q" value="{{.Filter}}" placeholder="name or key prefix">
+    </div>
+    <div>
+      <label for="kind">Show</label>
+      <select id="kind" name="kind">
+        <option value="unlinked" {{if eq .Show "unlinked"}}selected{{end}}>unlinked only</option>
+        <option value="rooms"    {{if eq .Show "rooms"}}selected{{end}}>room servers</option>
+        <option value="people"   {{if eq .Show "people"}}selected{{end}}>companions</option>
+        <option value="channels" {{if eq .Show "channels"}}selected{{end}}>mesh channels</option>
+      </select>
+    </div>
+    <div class="shrink"><button type="submit">Filter</button></div>
+  </div>
+</form>
+
+<div class="card">
+  {{if not .Candidates}}
+    <div class="empty">Nothing matches.</div>
+  {{else}}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Name</th><th>Kind</th><th>Key / slot</th><th>Path</th><th>Last heard</th><th></th></tr></thead>
+      <tbody>
+      {{range .Candidates}}
+        <tr>
+          <td>{{if .Label}}{{.Label}}{{else}}<span class="dim">unnamed</span>{{end}}</td>
+          <td>{{kindLabel .Kind}}</td>
+          <td class="mono">{{.Key}}</td>
+          <td class="dim">{{hopsLabel .Hops}}</td>
+          <td class="dim">{{if .LastAdvert.IsZero}}—{{else}}{{ago .LastAdvert}}{{end}}</td>
+          <td>
+            {{if .Linked}}<span class="badge mute">linked</span>{{else}}
+            <form method="POST" action="/links/add">
+              {{$.CSRF}}
+              <input type="hidden" name="kind" value="{{.Kind}}">
+              <input type="hidden" name="key" value="{{.Key}}">
+              <button class="small" type="submit">Link</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{end}}
+</div>
+{{template "footer" .}}
