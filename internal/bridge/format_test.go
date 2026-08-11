@@ -1,6 +1,10 @@
 package bridge
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -324,4 +328,44 @@ func TestRetryInstructionsNameTheTargetMessage(t *testing.T) {
 	if !strings.Contains(help, "failed message") {
 		t.Errorf("help does not say which message to react to:\n%s", help)
 	}
+}
+
+// A refusal must not promise something the bridge does not do.
+//
+// "Not sent — no link to the node right now. … I will keep trying." was a lie:
+// the message is dropped at that point and nothing requeues it when the link
+// comes back. A false promise is worse than a bare refusal, because it stops the
+// one person who could resend from resending.
+//
+// Promising future action is fine where it is true — a room login really is
+// retried on reconnect — so this checks only the package's outbound strings.
+//
+// The file is parsed rather than grepped so that only real string literals are
+// examined. A comment explaining the old wording has to quote it, and a plain
+// text search cannot tell that apart from the bug.
+func TestRefusalsDoNotPromiseRetries(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "outbound.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse outbound.go: %v", err)
+	}
+
+	banned := []string{"keep trying", "keep retrying", "will try again"}
+	ast.Inspect(f, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		text, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return true
+		}
+		for _, bad := range banned {
+			if strings.Contains(strings.ToLower(text), bad) {
+				t.Errorf("%s: promises a retry the bridge does not make: %q",
+					fset.Position(lit.Pos()), text)
+			}
+		}
+		return true
+	})
 }

@@ -118,9 +118,25 @@ func (b *Bridge) handleRoutedMessage(ctx context.Context, route store.Route, m *
 
 	sess := b.link.Session()
 	if sess == nil {
+		// Two separate facts, and the distinction matters. The LINK keeps
+		// retrying on its own — 2 seconds backing off to 60 — so a node that is
+		// merely still booting will be picked up without anyone doing anything.
+		// THIS MESSAGE will not: it is dropped here, and nothing requeues it when
+		// the link returns.
+		//
+		// So the wording promises only what happens. It used to end "I will keep
+		// trying", which conflated the two and left people waiting for a send
+		// that was never going to happen. Holding the message instead would be
+		// worse than it sounds — the radio can be away for hours, and a message
+		// that quietly arrives long after it stopped being relevant is not one
+		// anybody wanted sent.
 		b.react(ctx, m.ChannelID, m.ID, EmojiFail)
 		b.say(ctx, m.ChannelID, "**Not sent — no link to the node right now.** "+
-			"Check the radio is connected; I will keep trying.")
+			"If the device restarted recently, give it a few minutes: reconnecting "+
+			"is automatic, and over Bluetooth it can take a while to pair and read "+
+			"the contact list. Otherwise check the radio is connected and powered.\n"+
+			"This message was not queued. Once the link is back, react "+EmojiRetry+
+			" on it to send it.")
 		return
 	}
 
@@ -776,7 +792,9 @@ func (b *Bridge) resendMessage(ctx context.Context, route store.Route, channelID
 	sess := b.link.Session()
 	if sess == nil {
 		b.react(ctx, channelID, messageID, EmojiFail)
-		b.say(ctx, channelID, "**Not resent — no link to the node right now.**")
+		b.say(ctx, channelID, "**Not resent — no link to the node right now.** "+
+			"If the device restarted recently, give it a few minutes; reconnecting is "+
+			"automatic. Then react "+EmojiRetry+" again.")
 		return
 	}
 
