@@ -35,6 +35,12 @@ String utf8_truncate(const String& in, size_t max_bytes);
 // socket, deadlocked BLE stack) left the device silently dead. The watchdog
 // reboots it instead. feed() must be called from any loop that can run longer
 // than the timeout — contact enumeration and a poll sweep both can.
+// Breadcrumb for hangs. The watchdog reboots the device but says nothing about
+// WHERE it was stuck, and a RISC-V panic gives no usable call trace — so record
+// the last place we got to, and print it when a stage takes suspiciously long.
+void stage_set(const char* where, int line);
+#define STAGE(w) stage_set((w), __LINE__)
+
 void watchdog_begin(uint32_t timeout_s);
 void watchdog_feed();
 

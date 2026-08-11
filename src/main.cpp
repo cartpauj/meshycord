@@ -268,9 +268,42 @@ static const size_t MAX_PENDING = 8;
 static Pending g_pending[MAX_PENDING];
 static size_t  g_pending_n = 0;
 
-static const char* EMOJI_OK   = "\xE2\x9C\x85";   // white_check_mark
-static const char* EMOJI_FAIL = "\xE2\x9D\x8C";   // x
-static const char* EMOJI_SENT = "\xF0\x9F\x93\xA1"; // satellite antenna
+static const char* EMOJI_OK    = "\xE2\x9C\x85";   // white_check_mark
+static const char* EMOJI_FAIL  = "\xE2\x9D\x8C";   // x
+static const char* EMOJI_SENT  = "\xF0\x9F\x93\xA1"; // satellite antenna
+// Shown while a resend is in flight. A direct message is not ticked until the
+// node confirms delivery, which can be up to two minutes, so something has to
+// say "working on it" in the meantime.
+static const char* EMOJI_RETRY = "\xF0\x9F\x94\x84"; // arrows_counterclockwise
+
+// Messages currently showing the in-progress marker. Tracked rather than always
+// attempting a clear, because clearing is a REST call and adding one to every
+// normal send would cost two to three seconds a message for nothing.
+static const size_t MAX_RETRY_MARKS = 4;
+static String g_retry_marks[MAX_RETRY_MARKS];
+
+static void retry_mark_add(const String& id) {
+  for (size_t i = 0; i < MAX_RETRY_MARKS; i++)
+    if (g_retry_marks[i].length() == 0) { g_retry_marks[i] = id; return; }
+  g_retry_marks[0] = id;         // full: overwrite the oldest slot
+}
+
+static bool retry_mark_take(const String& id) {
+  for (size_t i = 0; i < MAX_RETRY_MARKS; i++) {
+    if (g_retry_marks[i] != id) continue;
+    g_retry_marks[i] = (const char*)nullptr;
+    return true;
+  }
+  return false;
+}
+
+// Apply a final verdict, taking down the in-progress marker first if this
+// message was a resend.
+static void react_verdict(const String& ch, const String& msg,
+                          const char* emoji) {
+  if (retry_mark_take(msg)) discord_unreact(ch, msg, EMOJI_RETRY);
+  discord_react(ch, msg, emoji);
+}
 
 static void pending_add(uint32_t ack, uint32_t timeout_ms,
                         const String& ch, const String& msg) {
@@ -287,7 +320,7 @@ static void pending_service() {
     for (size_t i = 0; i < g_pending_n; i++) {
       if (g_pending[i].ack != ack) continue;
       String label = String(EMOJI_OK);
-      discord_react(g_pending[i].channel_id, g_pending[i].message_id, EMOJI_OK);
+      react_verdict(g_pending[i].channel_id, g_pending[i].message_id, EMOJI_OK);
       Serial.printf("[ack] delivered in %ums\n", trip);
       for (size_t j = i; j + 1 < g_pending_n; j++) g_pending[j] = g_pending[j + 1];
       g_pending_n--;
@@ -298,10 +331,100 @@ static void pending_service() {
   for (size_t i = 0; i < g_pending_n; ) {
     if ((int32_t)(g_pending[i].deadline - now) <= 0) {
       Serial.println("[ack] no confirmation before timeout");
-      discord_react(g_pending[i].channel_id, g_pending[i].message_id, EMOJI_FAIL);
+      react_verdict(g_pending[i].channel_id, g_pending[i].message_id, EMOJI_FAIL);
       for (size_t j = i; j + 1 < g_pending_n; j++) g_pending[j] = g_pending[j + 1];
       g_pending_n--;
     } else i++;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Room server sessions
+//
+// A room server refuses posts from anyone who has not logged in, and the
+// session does not last forever. The companion protocol does not pass the
+// server's keep-alive interval on to us, so rather than guessing an expiry we
+// re-login whenever the BLE link comes back and whenever a post to that room
+// goes unacknowledged — the two things that actually indicate a dead session.
+// ---------------------------------------------------------------------------
+// One per linked room at most, so it can never be the thing that runs out:
+// a smaller cap would silently report the extra rooms as permanently logged
+// out. A prefix is 12 characters, so it lives inline in the String.
+static const size_t MAX_SESSIONS = MAX_ROUTES;
+struct RoomSession {
+  String   prefix;
+  bool     logged_in;
+  uint32_t last_attempt;
+};
+static RoomSession g_sessions[MAX_SESSIONS];
+static size_t      g_sessions_n = 0;
+
+static RoomSession* session_for(const String& prefix, bool create) {
+  for (size_t i = 0; i < g_sessions_n; i++)
+    if (g_sessions[i].prefix == prefix) return &g_sessions[i];
+  if (!create || g_sessions_n >= MAX_SESSIONS) return nullptr;
+  g_sessions[g_sessions_n] = { prefix, false, 0 };
+  return &g_sessions[g_sessions_n++];
+}
+
+bool room_is_logged_in(const String& prefix) {
+  RoomSession* s = session_for(prefix, false);
+  return s && s->logged_in;
+}
+
+// Try to log in, if we have a password and are not hammering the room.
+static bool room_try_login(const String& prefix) {
+  String pw = room_password_get(prefix);
+  if (pw.length() == 0) return false;
+  RoomSession* s = session_for(prefix, true);
+  if (!s) return false;
+  // Logging in costs airtime and the reply takes seconds to come back. Do not
+  // retry faster than that or a busy channel turns into a login storm.
+  if (s->last_attempt && millis() - s->last_attempt < 30000) return false;
+  s->last_attempt = millis();
+  Serial.printf("[room] logging in to %s\n", prefix.c_str());
+  return mesh_room_login(prefix, pw);
+}
+
+// Log in to every room we hold a password for. Called once the mesh link is up.
+static void rooms_login_all() {
+  for (size_t i = 0; i < routes_count(); i++) {
+    Route* r = routes_at(i);
+    if (!r || r->kind != ROUTE_ROOM) continue;
+    RoomSession* s = session_for(r->key, true);
+    if (s) { s->logged_in = false; s->last_attempt = 0; }   // link is new
+    if (!room_password_known(r->key)) continue;
+    // Each login is a command with a 5 second timeout, so a handful of rooms
+    // can add up to a meaningful fraction of the 90s watchdog.
+    watchdog_feed();
+    room_try_login(r->key);
+    delay(300);                       // stagger them; this is airtime
+  }
+}
+
+// Drain login verdicts and say what happened, in the room's own channel.
+static void rooms_service() {
+  String prefix;
+  bool ok = false;
+  while (mesh_take_login_result(prefix, &ok)) {
+    RoomSession* s = session_for(prefix, true);
+    if (s) s->logged_in = ok;
+    Serial.printf("[room] login %s: %s\n", prefix.c_str(), ok ? "OK" : "FAILED");
+
+    Route* r = route_find(ROUTE_ROOM, prefix);
+    if (!r) continue;
+    if (ok) {
+      discord_send(r->channel_id,
+        "Logged in to this room server. Anything you missed should arrive "
+        "shortly, over the air.");
+    } else {
+      discord_send(r->channel_id,
+        "**The room server rejected that password.**\n"
+        "Paste this into <#" + g_settings.admin_channel + ">, with the right "
+        "password on the end:\n"
+        "```\nlogin " + prefix + " \n```"
+        "Your message is deleted the moment it is read.");
+    }
   }
 }
 
@@ -397,7 +520,7 @@ static void send_to_mesh_chunked(bool is_channel, uint8_t chan_idx,
     }
   }
   if (text.length() == 0) {
-    if (ui) discord_react(react_channel, react_message, EMOJI_FAIL);
+    if (ui) react_verdict(react_channel, react_message, EMOJI_FAIL);
     return;
   }
   String chunks[MAX_CHUNKS];
@@ -413,7 +536,7 @@ static void send_to_mesh_chunked(bool is_channel, uint8_t chan_idx,
   size_t needed = chunk_count(text, MESH_MAX_MSG_LEN);
   if (needed > MAX_CHUNKS) {
     if (have_ui) {
-      discord_react(react_channel, react_message, EMOJI_FAIL);
+      react_verdict(react_channel, react_message, EMOJI_FAIL);
       discord_send(react_channel,
         "**Not sent — too long.** " + String((int)text.length()) +
         " characters would need " + String((int)needed) + " transmissions; "
@@ -437,10 +560,10 @@ static void send_to_mesh_chunked(bool is_channel, uint8_t chan_idx,
       discord_send(react_channel, flooded ? "Sent by flood."
                                           : "Sent via the stored path.");
     if (!have_ui) return;
-    if (!ok)                 discord_react(react_channel, react_message, EMOJI_FAIL);
-    else if (is_channel)     discord_react(react_channel, react_message, EMOJI_SENT);
+    if (!ok)                 react_verdict(react_channel, react_message, EMOJI_FAIL);
+    else if (is_channel)     react_verdict(react_channel, react_message, EMOJI_SENT);
     else if (ack)            pending_add(ack, est, react_channel, react_message);
-    else                     discord_react(react_channel, react_message, EMOJI_SENT);
+    else                     react_verdict(react_channel, react_message, EMOJI_SENT);
     return;
   }
 
@@ -464,17 +587,124 @@ static void send_to_mesh_chunked(bool is_channel, uint8_t chan_idx,
                   (unsigned)i + 1, (unsigned)n, ok ? "ok" : "FAILED");
 
     if (echo_id.length()) {
-      if (!ok)              discord_react(react_channel, echo_id, EMOJI_FAIL);
-      else if (is_channel)  discord_react(react_channel, echo_id, EMOJI_SENT);
+      if (!ok)              react_verdict(react_channel, echo_id, EMOJI_FAIL);
+      else if (is_channel)  react_verdict(react_channel, echo_id, EMOJI_SENT);
       else if (ack)         pending_add(ack, est, react_channel, echo_id);
-      else                  discord_react(react_channel, echo_id, EMOJI_SENT);
+      else                  react_verdict(react_channel, echo_id, EMOJI_SENT);
     }
 
     if (!ok) {
-      if (have_ui) discord_react(react_channel, react_message, EMOJI_FAIL);
+      if (have_ui) react_verdict(react_channel, react_message, EMOJI_FAIL);
       return;                       // stop; do not send the rest out of order
     }
     if (i + 1 < n) delay(CHUNK_GAP_MS);   // give the mesh room to breathe
+  }
+}
+
+// Strip the "[2/3] " marker the splitter puts on each transmission, so replying
+// to one failed piece of a split message resends exactly that piece rather than
+// the whole thing again.
+static bool strip_chunk_marker(const String& in, String& out) {
+  if (!in.startsWith("[")) return false;
+  int close = in.indexOf("] ");
+  if (close < 2 || close > 8) return false;
+  int slash = in.indexOf('/');
+  if (slash < 0 || slash > close) return false;
+  for (int i = 1; i < close; i++) {
+    if (i == slash) continue;
+    if (!isdigit((unsigned char)in[i])) return false;
+  }
+  out = in.substring(close + 2);
+  return true;
+}
+
+// "retry", sent as a REPLY to a message that failed, sends it again.
+//
+// A reply rather than a reaction because a reply is an ordinary message: it
+// arrives on the poll that was already happening, and message_reference names
+// exactly which message it refers to. Reactions cannot be polled for at all —
+// they are only delivered over the Gateway — and watching for one would mean a
+// request per failed message per sweep.
+static void handle_retry(Route* r, const DiscordMessage& dm) {
+  if (dm.ref_id.length() == 0) {
+    discord_send(r->channel_id,
+      "To resend something, **reply** to the message that failed and say "
+      "`retry` (or `resend`). On mobile that is a swipe on the message; on "
+      "desktop, hover it and pick Reply.");
+    return;
+  }
+
+  String text = dm.ref_content;
+  bool from_bot = dm.ref_is_bot;
+  if (!dm.ref_present) {
+    // Discord did not inline the original, so go and get it.
+    if (!discord_get_message(r->channel_id, dm.ref_id, text, from_bot)) {
+      discord_send(r->channel_id, "Could not read that message to resend it.");
+      return;
+    }
+  }
+
+  // A bot message is only resendable if it is one of our own transmissions;
+  // anything else is a status line, and echoing that onto the mesh is nonsense.
+  String chunk;
+  bool is_chunk = strip_chunk_marker(text, chunk);
+  if (from_bot) {
+    if (!is_chunk) {
+      discord_send(r->channel_id,
+        "That is one of my own status messages, not something that was sent to "
+        "the mesh. Reply to your own message, or to a numbered `[1/3]` "
+        "transmission.");
+      return;
+    }
+    text = chunk;             // resend just this transmission
+  }
+
+  text.trim();
+  if (text.length() == 0) {
+    discord_send(r->channel_id, "That message has no text to resend.");
+    return;
+  }
+
+  // Clear our old verdict so the new one is not read alongside a stale cross.
+  // Only our own reactions — removing anyone else's would need MANAGE_MESSAGES.
+  discord_unreact(r->channel_id, dm.ref_id, EMOJI_FAIL);
+  discord_unreact(r->channel_id, dm.ref_id, EMOJI_SENT);
+  discord_unreact(r->channel_id, dm.ref_id, EMOJI_OK);
+
+  // A room server drops posts from anyone without a session, exactly as it does
+  // for a first attempt — resending into that would look like a retry that
+  // quietly achieved nothing.
+  if (r->kind == ROUTE_ROOM && !room_is_logged_in(r->key)) {
+    discord_react(r->channel_id, dm.ref_id, EMOJI_FAIL);
+    discord_send(r->channel_id,
+      "**Not resent — not logged in to this room server.**" +
+      String(room_password_known(r->key)
+        ? (room_try_login(r->key)
+             ? " Logging in now; reply `retry` again in a few seconds."
+             : " A login is already in progress; try again in a moment.")
+        : ("\nPaste this into <#" + g_settings.admin_channel +
+           "> with the room's password on the end:\n```\nlogin " + r->key +
+           " \n```")));
+    return;
+  }
+
+  // Mark it in progress straight away. A direct message is only ticked when the
+  // node confirms delivery, which can be two minutes later — so without this the
+  // cross simply vanishes and nothing appears to happen for a long time. Cleared
+  // by react_verdict once there is a real answer.
+  retry_mark_add(dm.ref_id);
+  discord_react(r->channel_id, dm.ref_id, EMOJI_RETRY);
+
+  Serial.printf("[retry] resending %s in %s\n", dm.ref_id.c_str(),
+                r->channel_id.c_str());
+
+  // The result lands back on the ORIGINAL message, which is where you are
+  // looking, rather than on the word "retry".
+  if (r->kind == ROUTE_CHANNEL) {
+    send_to_mesh_chunked(true, (uint8_t)r->key.toInt(), "", text,
+                         r->channel_id, dm.ref_id);
+  } else {
+    send_to_mesh_chunked(false, 0, r->key, text, r->channel_id, dm.ref_id);
   }
 }
 
@@ -482,6 +712,13 @@ static void send_to_mesh_chunked(bool is_channel, uint8_t chan_idx,
 static void handle_discord_message(Route* r, const DiscordMessage& dm) {
   if (dm.content.length() == 0) return;
   mark_channel_hot(r);        // you are mid-conversation here
+
+  // Checked before anything is sent anywhere: these are commands, and must
+  // never themselves go out over the mesh.
+  {
+    String t = dm.content; t.trim(); t.toLowerCase();
+    if (t == "retry" || t == "resend") { handle_retry(r, dm); return; }
+  }
 
   // Manual promotion: "!promote <prefix>"
   if (dm.content.startsWith("!promote ")) {
@@ -511,6 +748,37 @@ static void handle_discord_message(Route* r, const DiscordMessage& dm) {
     return;
   }
   if (r->kind == ROUTE_DM || r->kind == ROUTE_ROOM) {
+    // A room server drops posts from anyone without a session, and it does so
+    // silently — the send itself succeeds, the post simply never appears. Say
+    // so up front rather than letting it look like a delivery that worked.
+    if (r->kind == ROUTE_ROOM && !room_is_logged_in(r->key)) {
+      if (!room_password_known(r->key)) {
+        discord_react(r->channel_id, dm.id, EMOJI_FAIL);
+        // The command goes on its own line in a code block: Discord gives that
+        // a copy button on desktop and makes it one tap to select on mobile.
+        // Nobody should have to retype a key prefix from memory.
+        discord_send(r->channel_id,
+          "**Not sent — no password for this room server.**\n"
+          "Room servers only accept posts from someone logged in. Paste this "
+          "into <#" + g_settings.admin_channel + ">, with the room's password "
+          "on the end:\n"
+          "```\nlogin " + r->key + " \n```"
+          "Your message is deleted the moment it is read, so the password does "
+          "not stay in the channel.");
+        return;
+      }
+      // We have a password but no live session — most likely it lapsed while
+      // the bridge was away. Log in and let the user retry rather than sending
+      // into the void.
+      discord_react(r->channel_id, dm.id, EMOJI_FAIL);
+      discord_send(r->channel_id,
+        room_try_login(r->key)
+          ? "**Not sent — not logged in to this room server.** Logging in now; "
+            "try again in a few seconds."
+          : "**Not sent — not logged in to this room server.** A login is "
+            "already in progress; try again in a moment.");
+      return;
+    }
     send_to_mesh_chunked(false, 0, r->key, dm.content, r->channel_id, dm.id);
     return;
   }
@@ -575,7 +843,18 @@ static void poll_channel(const String& channel_id, String& cursor_io,
   }
 }
 
-static String g_admin_cursor;      // RAM only: stale commands must not re-run
+// The admin poll cursor is deliberately NOT persisted, so after a reboot the
+// bridge has no idea what it has already acted on. Discord is then asked for the
+// most recent messages with no "since" marker, which is every recent command
+// again — a reboot replayed the last handful of commands, and `help`, `find` and
+// `contact add` all ran a second time. A watchdog reboot did it three times over.
+//
+// The first poll after boot therefore only ARMS the cursor: it records where the
+// channel is and acts on nothing. Anything typed while the device was down is
+// ignored, which is the right way round — replaying `reset confirm` or
+// `sync rooms confirm` unprompted is far worse than missing a command.
+static String g_admin_cursor;
+static bool   g_admin_primed = false;
 
 static void poll_admin() {
   if (g_settings.admin_channel.length() == 0) return;
@@ -590,12 +869,19 @@ static void poll_admin() {
       g_settings.admin_channel = "";
       settings_save();
       g_admin_cursor = "";
+      g_admin_primed = false;      // re-arm against the replacement channel
       admin_bootstrap();          // rebuild immediately, do not wait for a reboot
     }
     return;
   }
   if (newest.length()) g_admin_cursor = newest;
-  for (size_t i = 0; i < n; i++) admin_handle(msgs[i].content);
+  if (!g_admin_primed) {
+    g_admin_primed = true;
+    if (n) Serial.printf("[admin] armed at boot; ignoring %u message(s) already "
+                         "in the channel\n", (unsigned)n);
+    return;
+  }
+  for (size_t i = 0; i < n; i++) admin_handle(msgs[i].content, msgs[i].id);
 }
 
 // A channel is "hot" for a while after mesh traffic is relayed into it, or
@@ -620,14 +906,17 @@ static void poll_discord_once() {
   // One TLS handshake for the whole sweep. Without this, every channel needed
   // its own 1-2s handshake, which is why only one could be checked per cycle —
   // and with many links a typed reply could wait many minutes to be sent.
+  STAGE("poll:session");
   discord_session_begin();
 
   if (do_slow) {
     g_last_slow_poll = now;
+    STAGE("poll:admin");
     poll_admin();                       // commands
     // The inbox is informational: nothing typed there does anything except
     // trigger a hint, so it does not need checking often.
     String cursor = inbox_cursor_get();
+    STAGE("poll:inbox");
     poll_channel(g_settings.inbox_channel, cursor, nullptr);
     inbox_cursor_set(cursor);
   }
@@ -641,6 +930,7 @@ static void poll_discord_once() {
     // Every channel on every slow tick; hot ones also on fast ticks.
     if (!(do_slow || (hot && do_fast))) { i++; continue; }
     watchdog_feed();
+    STAGE("poll:route");
 
     size_t before = routes_count();
     String rc = r->last_discord_id;
@@ -757,13 +1047,19 @@ void loop() {
     // Channel names are only known once the mesh link is up, so the automatic
     // channel linking has to happen here rather than in setup().
     static bool synced_once = false;
-    if (!synced_once) { synced_once = true; admin_sync_after_mesh(); }
+    if (!synced_once) { synced_once = true; STAGE("sync_after_mesh"); admin_sync_after_mesh(); }
+    // Room sessions do not survive the link going away, so re-establish them
+    // on every reconnect rather than only on the first one.
+    STAGE("rooms_login_all");
+    rooms_login_all();
   }
 
-  if (mesh_messages_waiting()) drain_mesh();
-  pending_service();
+  if (mesh_messages_waiting()) { STAGE("drain_mesh"); drain_mesh(); }
+  STAGE("pending_service"); pending_service();
+  STAGE("rooms_service");   rooms_service();
 
-  poll_discord_once();
+  STAGE("poll_discord");    poll_discord_once();
+  STAGE("idle");
 
   static uint32_t last_report = 0;
   if (millis() - last_report > 60000) {

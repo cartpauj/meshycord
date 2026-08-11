@@ -2,12 +2,26 @@
 
 #include <Arduino.h>
 
+// Largest batch discord_poll() will fetch or buffer in one call. Callers ask for
+// 8 and 6; the scratch array lives on the loop task's 8KB stack alongside
+// HTTPClient and mbedTLS, so this is not free space to round up.
+static const size_t POLL_BATCH_MAX = 8;
+
 struct DiscordMessage {
   String id;          // needed to react to it later
   String content;
   String author_id;
   String author_name;
   bool   is_bot;        // MUST be checked — see echo-loop hazard
+
+  // Reply target, when this message is a reply. A reply is an ordinary message,
+  // so it arrives on the poll that was happening anyway — which is what makes
+  // "reply with retry" free, where watching for a reaction would cost a request
+  // per message. Reactions are Gateway-only and cannot be polled for at all.
+  String ref_id;        // message_reference.message_id; empty if not a reply
+  String ref_content;   // referenced_message.content, when Discord inlined it
+  bool   ref_is_bot = false;
+  bool   ref_present = false;   // referenced_message was inlined, not just cited
 };
 
 // Group several requests onto ONE TLS connection.
@@ -84,11 +98,27 @@ bool discord_delete_channel(const String& channel_id);
 // a channel deleted by hand would otherwise never be recreated.
 bool discord_channel_exists(const String& channel_id);
 
+// Delete a message. Used to get a typed room-server password out of the channel
+// history immediately. Deleting a message the bot did not write requires the
+// MANAGE_MESSAGES permission, so this returns false when the bot lacks it and
+// the caller must tell the user the password is still sitting there.
+bool discord_delete_message(const String& channel_id, const String& message_id);
+
 // True if Discord last rejected our credentials (401/403). Surfaced in the web
 // UI: without this a revoked token just makes everything fail silently forever.
 bool discord_auth_failed();
 
 // Add a reaction to a message, as the bot. Used to mark whether a message you
 // typed in Discord was actually delivered over the mesh.
+// Fetch a single message's content, for when a reply did not inline the message
+// it replied to.
+bool discord_get_message(const String& channel_id, const String& message_id,
+                         String& content_out, bool& is_bot_out);
+
+// Remove the bot's OWN reaction. Needs no special permission, unlike removing
+// someone else's.
+bool discord_unreact(const String& channel_id, const String& message_id,
+                     const String& emoji);
+
 bool discord_react(const String& channel_id, const String& message_id,
                    const String& emoji);

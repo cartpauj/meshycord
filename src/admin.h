@@ -37,7 +37,10 @@ bool admin_ensure_channel();
 bool admin_is_admin_channel(const String& channel_id);
 
 // Handle one message typed by a human in the admin channel.
-void admin_handle(const String& content);
+// `message_id` lets a command remove its own Discord message, which the
+// `login` command does so a typed password does not stay in the channel
+// history. Pass "" if there is nothing to delete.
+void admin_handle(const String& content, const String& message_id);
 
 // Discord category a route kind belongs in, creating it if needed. Returns ""
 // on failure, in which case the caller should create the channel uncategorised

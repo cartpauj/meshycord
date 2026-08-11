@@ -54,3 +54,11 @@ bool route_remove(RouteKind kind, const String& key);
 String inbox_cursor_get();
 void   inbox_cursor_set(const String& id);
 void routes_clear();
+
+// Room-server passwords, keyed by the room's 12-character pubkey prefix.
+// A room server refuses posts until you have logged in, and the session expires,
+// so the password is kept to re-login after a reconnect rather than asked for
+// again. Setting an empty password forgets it.
+void   room_password_set(const String& prefix, const String& password);
+String room_password_get(const String& prefix);
+bool   room_password_known(const String& prefix);

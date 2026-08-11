@@ -12,6 +12,7 @@ static const uint8_t CMD_SEND_TXT_MSG        = 0x02;
 static const uint8_t CMD_SEND_CHANNEL_TXT    = 0x03;
 static const uint8_t CMD_GET_CONTACTS        = 0x04;
 static const uint8_t CMD_ADD_UPDATE_CONTACT  = 0x09;
+static const uint8_t CMD_REMOVE_CONTACT      = 0x0F;  // needs the FULL 32-byte key
 static const uint8_t CMD_RESET_PATH          = 0x0D;
 static const uint8_t CMD_SET_DEVICE_TIME     = 0x06;
 static const uint8_t CMD_SYNC_NEXT_MESSAGE   = 0x0A;
@@ -37,6 +38,13 @@ static const uint8_t PKT_CHANNEL_MSG_RECV_V3 = 0x11;
 static const uint8_t PKT_CHANNEL_INFO       = 0x12;  // reply to CMD_GET_CHANNEL
 static const uint8_t PUSH_SEND_CONFIRMED     = 0x82;  // [ack 4][trip_time 4]
 static const uint8_t PUSH_MSG_WAITING        = 0x83;
+// A room-server login is answered asynchronously, not by the CMD_SEND_LOGIN
+// reply — that only confirms the request went out over the air.
+//   0x85: [perms 1][pubkey prefix 6][server time 4][acl 1][fw level 1]
+//   0x86: [reserved 1][pubkey prefix 6]
+// Both carry the 6-byte prefix, which is what identifies the room.
+static const uint8_t PUSH_LOGIN_SUCCESS      = 0x85;
+static const uint8_t PUSH_LOGIN_FAIL         = 0x86;
 
 // --- advert types (AdvertDataHelpers.h:7)
 static const uint8_t ADV_TYPE_NONE     = 0;
@@ -148,7 +156,39 @@ bool mesh_take_confirmation(uint32_t* ack_out, uint32_t* trip_ms_out);
 bool mesh_send_channel(uint8_t channel_idx, const String& text);
 
 // Log into a room server (needed before it will relay messages).
+// One contact found by a live scan. Carries the FULL public key, because
+// removing a contact needs it and the six-byte prefix a message arrives with is
+// not enough.
+struct MeshContactMatch {
+  char    prefix[13];
+  char    name[36];
+  uint8_t type;
+  uint8_t hops;
+  uint8_t pubkey[PUB_KEY_SZ];
+};
+
+// Scan the node's ENTIRE contact list for names containing `needle`, and return
+// up to `max` matches.
+//
+// Deliberately not served from the contact cache: that only keeps companions and
+// room servers, so on a 350-contact mesh roughly 255 repeaters and sensors are
+// invisible to it — and those are exactly what you want to find when clearing
+// out clutter. An empty needle matches everything. Costs a full enumeration,
+// several seconds, so this is a command, never a background refresh.
+size_t mesh_find_contacts(const String& needle, MeshContactMatch* out,
+                          size_t max);
+
+// Remove a contact from the node. `pubkey_hex` must be the full 64 hex
+// characters. False means the node reported it does not have that contact.
+bool mesh_remove_contact(const String& pubkey_hex);
+
+// Sends the login. A true return only means the request went out over the air —
+// the room's verdict arrives later via mesh_take_login_result().
 bool mesh_room_login(const String& prefix_hex, const String& password);
+
+// Pops one room-login verdict (PUSH_CODE_LOGIN_SUCCESS / _FAIL). `prefix_out`
+// is the room's 12-character key prefix.
+bool mesh_take_login_result(String& prefix_out, bool* ok_out);
 
 // Add (or update) a contact on the node from a full 32-byte public key.
 //

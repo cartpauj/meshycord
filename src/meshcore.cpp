@@ -21,6 +21,15 @@ struct Confirm { uint32_t ack; uint32_t trip_ms; };
 static const size_t CQ = 8;
 static Confirm g_cq[CQ];
 static volatile size_t g_cq_head = 0, g_cq_tail = 0;
+
+// Room-server login results, same idea: captured in the callback, drained by
+// the main loop. Kept out of the response queue for the same reason as every
+// other push — a login result landing mid-command must never be mistaken for
+// that command's reply.
+struct LoginResult { char prefix[13]; bool ok; };
+static const size_t LQ = 4;
+static LoginResult g_lq[LQ];
+static volatile size_t g_lq_head = 0, g_lq_tail = 0;
 static volatile bool g_authenticated = false;   // MITM-protected link achieved?
 static uint8_t       g_auth_failures = 0;       // consecutive unauthenticated links
 
@@ -51,6 +60,8 @@ static bool fq_pop(Frame& out) {
 }
 static void fq_drain() { Frame f; while (fq_pop(f)) {} }
 
+static void hex12(const uint8_t* b, char* out13);
+
 static void onNotify(NimBLERemoteCharacteristic*, uint8_t* data,
                      size_t len, bool) {
   if (!len) return;
@@ -74,6 +85,17 @@ static void onNotify(NimBLERemoteCharacteristic*, uint8_t* data,
         g_cq[g_cq_head].ack = ack;
         g_cq[g_cq_head].trip_ms = trip;
         g_cq_head = next;
+      }
+    }
+    // Room login answered. The prefix sits at the same offset in both frames:
+    // [code][perms or reserved][pubkey prefix 6].
+    else if ((data[0] == PUSH_LOGIN_SUCCESS || data[0] == PUSH_LOGIN_FAIL) &&
+             len >= 8) {
+      size_t next = (g_lq_head + 1) % LQ;
+      if (next != g_lq_tail) {
+        hex12(&data[2], g_lq[g_lq_head].prefix);
+        g_lq[g_lq_head].ok = (data[0] == PUSH_LOGIN_SUCCESS);
+        g_lq_head = next;
       }
     }
     return;
@@ -142,6 +164,10 @@ static bool cmd(const uint8_t* payload, size_t len, uint8_t expect,
   }
   uint32_t deadline = millis() + timeout_ms;
   while (millis() < deadline) {
+    // Every mesh operation blocks here. A single wait is only seconds, but they
+    // come in runs — eight channel queries, each retried, is most of a minute of
+    // timeouts — and nothing above this fed the watchdog during a reconnect.
+    watchdog_feed();
     Frame f;
     if (fq_pop(f)) {
       if (expect == 0xFF || f.data[0] == expect) { if (reply) *reply = f; return true; }
@@ -166,6 +192,7 @@ static bool cmd_until(const uint8_t* payload, size_t len,
   }
   uint32_t deadline = millis() + timeout_ms;
   while (millis() < deadline) {
+    watchdog_feed();          // see cmd(): these waits stack up on reconnect
     Frame f;
     if (fq_pop(f)) {
       if (pred(f.data[0])) { if (reply) *reply = f; return true; }
@@ -205,7 +232,9 @@ bool mesh_connect() {
   scan->setInterval(100);
   scan->setWindow(99);
   Serial.println("[ble] scanning");
-  NimBLEScanResults res = scan->start(8, false);
+  watchdog_feed();
+  NimBLEScanResults res = scan->start(8, false);   // blocks for the full 8s
+  watchdog_feed();
 
   bool found = false;
   NimBLEAddress addr;
@@ -239,6 +268,7 @@ bool mesh_connect() {
   }
   g_authenticated = false;
   if (!g_client->connect(addr)) { Serial.println("[ble] connect failed"); return false; }
+  watchdog_feed();                  // connect has a 10s timeout of its own
   if (!g_client->secureConnection()) {
     Serial.println("[ble] bonding failed");
     g_client->disconnect();
@@ -258,6 +288,7 @@ bool mesh_connect() {
     return false;
   }
   g_auth_failures = 0;
+  watchdog_feed();                  // bonding can take several seconds
   g_client->setDataLen(251);
 
   NimBLERemoteService* svc = g_client->getService(NimBLEUUID(NUS_SERVICE));
@@ -501,8 +532,9 @@ bool mesh_refresh_contacts() {
   uint32_t deadline = millis() + 30000;
   size_t got = 0;
   while (millis() < deadline) {
+    watchdog_feed();
     Frame g;
-    if (!fq_pop(g)) { watchdog_feed(); delay(5); continue; }
+    if (!fq_pop(g)) { delay(5); continue; }
     if (g.data[0] == PKT_CONTACT)         { cache_put_from_frame(g); got++; continue; }
     if (g.data[0] == PKT_END_OF_CONTACTS) break;
     // anything else (pushes) is ignored during enumeration
@@ -513,6 +545,90 @@ bool mesh_refresh_contacts() {
                 (unsigned)g_cache_seen, (unsigned)g_cache_skipped,
                 (unsigned)g_cache_n,
                 g_cache_n >= CACHE_MAX ? "  *** CACHE FULL ***" : "");
+  return true;
+}
+
+// Scan every contact on the node, not just the cached ones.
+//
+// The cache deliberately holds only companions and room servers, so on a
+// 350-contact mesh some 255 repeaters and sensors never enter it — and those are
+// exactly what you are looking for when clearing out clutter. This streams the
+// enumeration and keeps matches, without touching the cache.
+size_t mesh_find_contacts(const String& needle, MeshContactMatch* out,
+                          size_t max) {
+  if (!g_connected || max == 0) return 0;
+
+  String want = needle;
+  want.toLowerCase();
+
+  uint8_t c = CMD_GET_CONTACTS;
+  Frame f;
+  if (!cmd(&c, 1, PKT_CONTACTS_START, &f, 8000)) {
+    Serial.println("[mesh] scan: no CONTACTS_START");
+    return 0;
+  }
+
+  size_t n = 0, seen = 0;
+  uint32_t deadline = millis() + 30000;
+  while (millis() < deadline) {
+    watchdog_feed();          // an enumeration can run for tens of seconds
+    Frame g;
+    if (!fq_pop(g)) { delay(5); continue; }
+    if (g.data[0] == PKT_END_OF_CONTACTS) break;
+    if (g.data[0] != PKT_CONTACT) continue;      // pushes, ignored
+    if (g.len < CONTACT_NAME_OFF) continue;
+    seen++;
+
+    char raw[33];
+    memset(raw, 0, sizeof(raw));
+    for (size_t i = 0; i < 32 && CONTACT_NAME_OFF + i < g.len; i++) {
+      char ch = (char)g.data[CONTACT_NAME_OFF + i];
+      if (!ch) break;
+      raw[i] = ch;
+    }
+    String name = utf8_truncate(String(raw), 32);
+
+    if (want.length()) {
+      String hay = name; hay.toLowerCase();
+      char pfx[13]; hex12(&g.data[1], pfx);
+      // Match the name or the key prefix, so a key seen on a message is enough
+      // to find its contact.
+      if (hay.indexOf(want) < 0 && strncmp(want.c_str(), pfx, want.length()) != 0)
+        continue;
+    }
+
+    if (n >= max) continue;         // keep counting, stop storing
+    hex12(&g.data[1], out[n].prefix);
+    memcpy(out[n].pubkey, &g.data[1], PUB_KEY_SZ);
+    out[n].type = g.data[CONTACT_TYPE_OFF];
+    out[n].hops = (CONTACT_PATHLEN_OFF < g.len) ? g.data[CONTACT_PATHLEN_OFF]
+                                                : 0xFF;
+    memset(out[n].name, 0, sizeof(out[n].name));
+    strncpy(out[n].name, name.c_str(), sizeof(out[n].name) - 1);
+    n++;
+  }
+  Serial.printf("[mesh] scan: %u contact(s) seen, %u matched\n",
+                (unsigned)seen, (unsigned)n);
+  return n;
+}
+
+bool mesh_remove_contact(const String& pubkey_hex) {
+  uint8_t key[PUB_KEY_SZ];
+  if (hex_to_bytes(pubkey_hex, key, sizeof(key)) != PUB_KEY_SZ) {
+    Serial.println("[mesh] remove_contact needs a full 32-byte (64 hex) key");
+    return false;
+  }
+  uint8_t buf[1 + PUB_KEY_SZ];
+  buf[0] = CMD_REMOVE_CONTACT;
+  memcpy(&buf[1], key, PUB_KEY_SZ);
+
+  Frame f;
+  if (!cmd(buf, sizeof(buf), 0xFF, &f)) return false;
+  if (f.data[0] != PKT_OK) {
+    // ERR_CODE_NOT_FOUND is the expected failure: the node has no such contact.
+    Serial.printf("[mesh] remove_contact rejected (0x%02X)\n", f.data[0]);
+    return false;
+  }
   return true;
 }
 
@@ -590,6 +706,7 @@ void mesh_refresh_channels() {
   delay(400);
   fq_drain();
   for (uint8_t i = 0; i < MESH_MAX_CHANNELS; i++) {
+    watchdog_feed();
     g_chan_valid[i] = false;
     g_chan_names[i][0] = 0;
     String n = mesh_channel_name(i);
@@ -735,6 +852,14 @@ bool mesh_room_login(const String& prefix_hex, const String& password) {
     Serial.printf("[mesh] room login rejected (0x%02X)\n", f.data[0]);
     return false;
   }
+  return true;
+}
+
+bool mesh_take_login_result(String& prefix_out, bool* ok_out) {
+  if (g_lq_tail == g_lq_head) return false;
+  prefix_out = g_lq[g_lq_tail].prefix;
+  if (ok_out) *ok_out = g_lq[g_lq_tail].ok;
+  g_lq_tail = (g_lq_tail + 1) % LQ;
   return true;
 }
 

@@ -131,6 +131,20 @@ size_t chunk_text(const String& text, size_t limit,
   return n;
 }
 
+static const char* g_stage = "boot";
+static uint32_t    g_stage_at = 0;
+
+void stage_set(const char* where, int line) {
+  uint32_t now = millis();
+  // Only ever reports the stage we are LEAVING, and only when it took long
+  // enough to matter. Silent in normal operation, loud right before a hang.
+  if (g_stage_at && (now - g_stage_at) > 15000)
+    Serial.printf("[stage] '%s' took %lums, now '%s' (main.cpp:%d)\n",
+                  g_stage, (unsigned long)(now - g_stage_at), where, line);
+  g_stage = where;
+  g_stage_at = now;
+}
+
 void watchdog_begin(uint32_t timeout_s) {
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
   esp_task_wdt_config_t cfg = { .timeout_ms = timeout_s * 1000,

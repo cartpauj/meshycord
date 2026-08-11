@@ -91,6 +91,43 @@ void routes_clear() {
   routes_save();
 }
 
+// --- room-server passwords -------------------------------------------------
+//
+// Stored under their own NVS key rather than inside the packed route record,
+// because that record is delimited with '|' and a password is free text: one
+// pipe in a password would silently shift every field after it. Key is "p" plus
+// the 12-character prefix, which is 13 characters — NVS caps keys at 15.
+static void pw_key(const String& prefix, char* out, size_t n) {
+  snprintf(out, n, "p%s", prefix.c_str());
+}
+
+void room_password_set(const String& prefix, const String& password) {
+  char k[20];
+  pw_key(prefix, k, sizeof(k));
+  Preferences p;
+  if (!p.begin(NS, false)) {
+    Serial.println("[route] NVS open failed; room password not saved");
+    return;
+  }
+  if (password.length() == 0) p.remove(k);
+  else                        put_checked(p, k, password);
+  p.end();
+}
+
+String room_password_get(const String& prefix) {
+  char k[20];
+  pw_key(prefix, k, sizeof(k));
+  Preferences p;
+  if (!p.begin(NS, true)) return "";
+  String v = p.getString(k, "");
+  p.end();
+  return v;
+}
+
+bool room_password_known(const String& prefix) {
+  return room_password_get(prefix).length() > 0;
+}
+
 // Stored as one packed string per slot: kind|key|channel_id|label|last_discord_id
 static String route_encode(const Route& r) {
   return String((int)r.kind) + "|" + r.key + "|" + r.channel_id + "|" +

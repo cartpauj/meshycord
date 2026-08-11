@@ -78,6 +78,9 @@ String admin_category_for(RouteKind kind) {
 
 String admin_create_channel(RouteKind kind, const String& name,
                             const String& topic, const String& name_fallback) {
+  // Creating a channel is one or two Discord round trips, and the callers below
+  // do these in loops of dozens. Nothing else on this path feeds the watchdog.
+  watchdog_feed();
   String id = discord_create_channel(name, topic, admin_category_for(kind),
                                      name_fallback);
   if (id.length()) return id;
@@ -316,7 +319,17 @@ static void do_add(const String& token, const String& custom_name) {
                                    "node-" + key.substring(0, 6));
   if (id.length()) {
     route_put(kind, key, id, label);
-    reply("Linked **" + label + "** `" + key + "` -> <#" + id + ">");
+    String msg = "Linked **" + label + "** `" + key + "` -> <#" + id + ">";
+    // A room server will not accept a post until you have logged in, so say so
+    // now rather than letting the first message fail. The command is in a code
+    // block so it can be copied rather than retyped.
+    if (kind == ROUTE_ROOM && !room_password_known(key)) {
+      msg += "\nRoom servers need a password before they accept posts. Paste "
+             "this back here with the password on the end:\n"
+             "```\nlogin " + key + " \n```"
+             "Your message is deleted the moment it is read.";
+    }
+    reply(msg);
   } else {
     reply("Could not create a channel for **" + label +
           "**. Check the bot has Manage Channels, and the 500-channel guild limit.");
@@ -333,9 +346,13 @@ static void do_remove(const String& token) {
   if (!gone && kind == ROUTE_ROOM) gone = route_remove(ROUTE_DM, key);
 
   if (gone) {
+    // Unlinking a room server should not leave its password sitting in NVS.
+    bool had_pw = room_password_known(key);
+    if (had_pw) room_password_set(key, "");
     reply("Unlinked **" + label + "** `" + key +
           "`. The Discord channel is left in place - delete it yourself if you "
-          "want it gone.");
+          "want it gone." +
+          String(had_pw ? " Its stored room password has been forgotten." : ""));
   } else {
     reply("**" + label + "** was not linked.");
   }
@@ -363,6 +380,7 @@ static void do_sync_rooms(bool confirmed) {
 
   int created = 0;
   for (size_t i = 0; i < mesh_contact_count() && created < 45; i++) {
+    watchdog_feed();
     MeshContact c; char pref[13];
     if (!mesh_contact_at(i, c, pref)) continue;
     if (c.type != ADV_TYPE_ROOM) continue;
@@ -379,12 +397,144 @@ static void do_sync_rooms(bool confirmed) {
 
 // Add a contact from a full public key, for a node seen on the public map that
 // adverts cannot reach. Auto-add only ever fires for nodes heard over the air.
+// --- contact scan snapshot --------------------------------------------------
+// `contact remove` needs the FULL 32-byte key, which no listing shows and nobody
+// is going to retype. A scan therefore remembers the full keys of what it found,
+// so a row number is enough to act on.
+static const size_t CSCAN_MAX = 16;
+static MeshContactMatch g_cscan[CSCAN_MAX];
+static size_t   g_cscan_n  = 0;
+static uint32_t g_cscan_at = 0;
+
+static bool cscan_valid() {
+  return g_cscan_n > 0 && (millis() - g_cscan_at) < SNAPSHOT_TTL_MS;
+}
+
+static const char* type_name(uint8_t t) {
+  switch (t) {
+    case ADV_TYPE_CHAT:     return "companion";
+    case ADV_TYPE_ROOM:     return "room";
+    case ADV_TYPE_REPEATER: return "repeater";
+    case ADV_TYPE_SENSOR:   return "sensor";
+    default:                return "unknown";
+  }
+}
+
+static void do_contact_find(const String& rest) {
+  String needle = rest; needle.trim();
+  if (!mesh_connected()) { reply("Not connected to the node right now."); return; }
+
+  reply(needle.length()
+          ? "Scanning the node's contacts for \"" + needle + "\"…"
+          : String("Scanning every contact on the node…"));
+
+  g_cscan_n = mesh_find_contacts(needle, g_cscan, CSCAN_MAX);
+  g_cscan_at = millis();
+
+  if (g_cscan_n == 0) {
+    reply("Nothing matched. This searches **every** contact on the node, "
+          "repeaters and sensors included — not just the ones the bridge "
+          "caches.");
+    return;
+  }
+
+  String out = "**Contacts on the node** — " + String((int)g_cscan_n) +
+               " shown\n```\n";
+  for (size_t i = 0; i < g_cscan_n; i++) {
+    String nm = utf8_truncate(String(g_cscan[i].name), 22);
+    char line[128];
+    snprintf(line, sizeof(line), "%2u %-22s %-9s %s\n",
+             (unsigned)i + 1, nm.length() ? nm.c_str() : "(unnamed)",
+             type_name(g_cscan[i].type), g_cscan[i].prefix);
+    out += line;
+  }
+  out += "```";
+  if (g_cscan_n == CSCAN_MAX)
+    out += "\n_Showing the first " + String((int)CSCAN_MAX) +
+           " — narrow it with `contact find <text>`._";
+  out += "\nRemove one with `contact remove <n>`. Numbering holds for 10 "
+         "minutes.";
+  reply(out);
+}
+
+static void do_contact_remove(const String& rest) {
+  String token = rest; token.trim();
+  if (token.length() == 0) {
+    reply("Usage: `contact remove <n>` using a number from the last "
+          "`contact find`, or `contact remove <64-hex-key>`.");
+    return;
+  }
+  if (!mesh_connected()) { reply("Not connected to the node right now."); return; }
+
+  String full_key, label;
+  String lower = token; lower.toLowerCase();
+
+  bool is_full_key = (lower.length() == 64);
+  if (is_full_key) {
+    for (size_t i = 0; i < lower.length(); i++) {
+      char ch = lower[i];
+      if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+        reply("That key is not hexadecimal.");
+        return;
+      }
+    }
+    full_key = lower;
+    label = lower.substring(0, 12);
+  } else {
+    int n = token.toInt();
+    if (n <= 0) {
+      // Removing needs the full key, and a 12-character prefix is not it — so
+      // rather than failing, point at the scan that can resolve one.
+      reply("Give a number from the last `contact find`, or a full 64-character "
+            "key. A 12-character prefix is not enough to remove a contact — run "
+            "`contact find " + token + "` and use the number.");
+      return;
+    }
+    if (!cscan_valid()) {
+      reply("That listing has expired. Run `contact find` again.");
+      return;
+    }
+    if ((size_t)n > g_cscan_n) {
+      reply("No item " + String(n) + " in the last scan (1-" +
+            String((int)g_cscan_n) + ").");
+      return;
+    }
+    const MeshContactMatch& m = g_cscan[n - 1];
+    char hex[65];
+    for (size_t i = 0; i < PUB_KEY_SZ; i++) sprintf(&hex[i * 2], "%02x", m.pubkey[i]);
+    hex[64] = 0;
+    full_key = hex;
+    label = String(m.name).length() ? String(m.name) : String(m.prefix);
+  }
+
+  if (!mesh_remove_contact(full_key)) {
+    reply("The node would not remove that contact. It may already be gone — "
+          "run `contact find` to check.");
+    return;
+  }
+
+  // Tidy up anything the bridge was holding for it. The Discord channel is left
+  // alone, as everywhere else: deleting a channel is the user's call.
+  String prefix = full_key.substring(0, 12);
+  String extra;
+  if (route_remove(ROUTE_DM, prefix) || route_remove(ROUTE_ROOM, prefix))
+    extra += " Its link was removed too; the Discord channel is left in place.";
+  if (room_password_known(prefix)) {
+    room_password_set(prefix, "");
+    extra += " Its stored room password has been forgotten.";
+  }
+
+  reply("Removed **" + label + "** `" + prefix + "` from the node." + extra +
+        "\n_The contact comes back if that node adverts again._");
+  g_cscan_n = 0;              // numbering refers to a list that has changed
+}
+
 static void do_contact_add(const String& rest) {
   String args = rest; args.trim();
   if (args.length() == 0) {
-    reply("Usage: `contact add <64-hex-key> [name]`, or add `room` at the end "
+    reply("Usage: `contact add <64-hex-key> <name>`, or add `room` at the end "
           "for a room server.\nThe key is the node's full public key, as shown "
-          "on the public map.");
+          "on the public map. A name is required.");
     return;
   }
 
@@ -399,6 +549,16 @@ static void do_contact_add(const String& rest) {
     type = ADV_TYPE_ROOM;
     name = name.substring(0, name.length() - 4);
     name.trim();
+  }
+
+  // A name is required. Without one the contact shows as "(unnamed)" everywhere,
+  // any channel created for it is named after hex, and it cannot be found by
+  // name later — so refuse rather than store something unusable.
+  if (name.length() == 0) {
+    reply("**A name is required.** Use `contact add <64-hex-key> <name>`.\n"
+          "Without one the contact is unnamed on the node, cannot be found by "
+          "name, and any channel created for it would be named after its key.");
+    return;
   }
 
   key.trim(); key.toLowerCase();
@@ -432,6 +592,68 @@ static void do_contact_add(const String& rest) {
         "Link a channel for it with `add " + key.substring(0, 12) + "`.");
 }
 
+// `login <n|keyprefix> <password>` — store a room server's password and use it.
+//
+// The password arrives as a plain Discord message, so the first thing done with
+// it is deleting that message. That needs MANAGE_MESSAGES; if the bot does not
+// have it the password is still sitting in the channel and the user has to be
+// told plainly rather than left assuming it was handled.
+static void do_login(const String& rest, const String& message_id) {
+  String args = rest; args.trim();
+  if (args.length() == 0) {
+    reply("Usage: `login <n|keyprefix> <password>`\n"
+          "Use a number from the last `list rooms`, or the room's 12-character "
+          "key. Your message is deleted as soon as I have read it.\n"
+          "`login <n|keyprefix>` with no password forgets the stored one.");
+    return;
+  }
+  // No password means "forget it"; that is why an absent space is not an error.
+  int sp = args.indexOf(' ');
+  String token    = (sp < 0) ? args : args.substring(0, sp);
+  String password = (sp < 0) ? ""   : args.substring(sp + 1);
+  password.trim();
+
+  // Delete FIRST. Everything below can reply, take airtime, or fail, and none of
+  // that should extend how long the password sits in the channel.
+  bool wiped = message_id.length() &&
+               discord_delete_message(g_settings.admin_channel, message_id);
+
+  RouteKind kind; String key, label, err;
+  if (!resolve_target(token, kind, key, label, err)) { reply(err); return; }
+
+  if (kind != ROUTE_ROOM) {
+    reply("**" + label + "** is not a room server. Only room servers take a "
+          "login — mesh channels use a shared secret held on your node, and "
+          "direct messages need no login at all.");
+    return;
+  }
+  if (password.length() == 0) {
+    room_password_set(key, "");
+    reply("Forgot the stored password for **" + label + "**.");
+    return;
+  }
+
+  room_password_set(key, password);
+
+  String note = "Password stored for **" + label + "** `" + key + "`. ";
+  if (!mesh_connected()) {
+    note += "The node is not connected right now, so I will log in as soon as "
+            "it is back.";
+  } else if (mesh_room_login(key, password)) {
+    note += "Logging in now — the room replies over the air, so give it a few "
+            "seconds. I will report the result in its channel.";
+  } else {
+    note += "**The node would not send the login.** That usually means the room "
+            "is not in its contact list; `add " + key + "` first.";
+  }
+  if (!wiped) {
+    note += "\n\n**I could not delete your message, so the password is still "
+            "visible above.** Delete it yourself, and give the bot the "
+            "**Manage Messages** permission so I can do it next time.";
+  }
+  reply(note);
+}
+
 static void do_status() {
   String s = "**Status**\n```\n";
   s += "mesh link   : " + String(mesh_connected() ? "connected" : "DOWN") + "\n";
@@ -459,17 +681,28 @@ static void do_help() {
     "add <n> as <name>    choose the Discord channel name\n"
     "remove <n|keyprefix> unlink\n"
     "\n"
-    "contact add <64-hex-key> [name]   add a node seen on the public map\n"
+    "contact add <64-hex-key> <name>   add a node seen on the public map\n"
     "contact add <key> <name> room     ...as a room server\n"
+    "contact find <text>               search EVERY contact on the node\n"
+    "contact list                      ...all of them\n"
+    "contact remove <n>                delete a contact from the node\n"
+    "\n"
+    "login <n|keyprefix> <password>    log in to a room server\n"
+    "login <n|keyprefix>               forget its stored password\n"
     "\n"
     "In a linked channel, prefix a message to override routing:\n"
     "  path:flood <text>    clear the stored path first, so it floods\n"
     "  path:direct <text>   use the stored path (this is the default)\n"
+    "In a linked channel, REPLY to a message with `retry` (or `resend`)\n"
+    "to send it again.\n"
     "status\n"
     "sync rooms           link every known room server (asks first)\n"
     "reset                delete everything the bridge created\n"
     "help\n"
     "```\n"
+    "_Your `login` message is deleted the moment it is read, so the password "
+    "does not stay in this channel. The password is kept on the device so the "
+    "session can be re-established after a reconnect._\n"
     "_Listings freeze their numbering for 10 minutes, so `add 7` always means "
     "the 7 you saw. Sorted by most-recently-heard by default._\n"
     "_Channel names are cosmetic - routing is by key, so renaming a Discord "
@@ -480,7 +713,8 @@ static void do_help() {
 static void do_reset(bool confirmed);
 
 // --- entry point -----------------------------------------------------------
-void admin_handle(const String& raw) {
+void admin_handle(const String& raw, const String& message_id) {
+  watchdog_feed();          // commands below can take tens of seconds
   String c = raw;
   c.trim();
   if (c.length() == 0) return;
@@ -495,6 +729,14 @@ void admin_handle(const String& raw) {
   if (lower == "sync rooms confirm")     { do_sync_rooms(true);  return; }
   if (lower.startsWith("contact add ")) { do_contact_add(c.substring(12)); return; }
   if (lower == "contact add")           { do_contact_add(""); return; }
+  if (lower.startsWith("contact find ")) { do_contact_find(c.substring(13)); return; }
+  if (lower.startsWith("contact list"))  { do_contact_find(""); return; }
+  if (lower == "contact find")           { do_contact_find(""); return; }
+  if (lower.startsWith("contact remove ")) { do_contact_remove(c.substring(15)); return; }
+  if (lower.startsWith("contact rm "))     { do_contact_remove(c.substring(11)); return; }
+  if (lower == "contact remove" || lower == "contact rm") { do_contact_remove(""); return; }
+  if (lower.startsWith("login "))       { do_login(c.substring(6), message_id); return; }
+  if (lower == "login")                 { do_login("", message_id); return; }
 
   if (lower.startsWith("add ")) {
     String rest = c.substring(4); rest.trim();
@@ -595,10 +837,17 @@ static void do_reset(bool confirmed) {
     return;
   }
 
-  int deleted = 0;
+  int deleted = 0, forgotten = 0;
   for (size_t i = 0; i < routes_count(); i++) {
+    watchdog_feed();
     Route* r = routes_at(i);
     if (discord_delete_channel(r->channel_id)) deleted++;
+    // Wipe room passwords too. A reset is meant to leave nothing behind, and
+    // leaving stored secrets for links that no longer exist is not that.
+    if (r->kind == ROUTE_ROOM && room_password_known(r->key)) {
+      room_password_set(r->key, "");
+      forgotten++;
+    }
   }
   routes_clear();
 
@@ -620,8 +869,10 @@ static void do_reset(bool confirmed) {
   admin_bootstrap();
 
   reply("Reset done — deleted " + String(deleted) +
-        " channel(s)/category(ies) and cleared all links. "
-        "A fresh **global-inbox** has been created.");
+        " channel(s)/category(ies) and cleared all links." +
+        String(forgotten ? " Forgot " + String(forgotten) +
+                           " stored room password(s)." : "") +
+        " A fresh **global-inbox** has been created.");
 }
 
 bool admin_bootstrap() {
@@ -630,6 +881,7 @@ bool admin_bootstrap() {
   // because that was deleted too. Four extra lookups on a rare path is a fair
   // price for not creating channels with a dead parent.
   admin_forget_categories();
+  watchdog_feed();
 
   // Verify the ids we have before trusting them. Channels deleted by hand would
   // otherwise never come back, because the create step is skipped whenever an
@@ -651,10 +903,15 @@ bool admin_bootstrap() {
   }
 
   // Categories up front, so the server has its shape before any channel lands.
+  // Four category lookups, each its own TLS handshake and channel listing.
   String cat = cat_cached(g_cat_admin, "MeshyCord");
+  watchdog_feed();
   admin_category_for(ROUTE_CHANNEL);
+  watchdog_feed();
   admin_category_for(ROUTE_ROOM);
+  watchdog_feed();
   admin_category_for(ROUTE_DM);
+  watchdog_feed();
 
   if (!admin_ensure_channel()) return false;
 
@@ -677,6 +934,7 @@ bool admin_bootstrap() {
   // channel keeps its route, the auto-link step skips it as "already linked",
   // and it only recovers after a poll returns 404.
   for (size_t i = 0; i < routes_count(); ) {
+    watchdog_feed();
     Route* r = routes_at(i);
     if (!r) break;
     if (!discord_channel_exists(r->channel_id)) {

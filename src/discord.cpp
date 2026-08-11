@@ -215,7 +215,7 @@ bool discord_poll(const String& channel_id, const String& after_id,
   if (channel_id.length() == 0) return false;
 
   String path = String(API_BASE) + "/channels/" + channel_id + "/messages?limit=";
-  path += String((int)(max_out > 20 ? 20 : max_out));
+  path += String((int)(max_out > POLL_BATCH_MAX ? POLL_BATCH_MAX : max_out));
   if (after_id.length()) { path += "&after="; path += after_id; }
 
   String resp;
@@ -236,14 +236,18 @@ bool discord_poll(const String& channel_id, const String& after_id,
   JsonArray arr = doc.as<JsonArray>();
   if (arr.isNull()) return false;
 
-  DiscordMessage tmp[20];
+  // Sized to the largest batch any caller asks for. This sits on the loop
+  // task's 8KB stack, in the same call chain as HTTPClient and mbedTLS, and a
+  // DiscordMessage is seven Strings — an oversized scratch array here is
+  // stack we cannot spare.
+  DiscordMessage tmp[POLL_BATCH_MAX];
   size_t n = 0;
   bool first = true;
   for (JsonObject m : arr) {
     // Discord returns newest-first, so the first element is the newest id in
     // this window. Record it before any filtering so the cursor always moves.
     if (first) { newest_seen_out = m["id"].as<String>(); first = false; }
-    if (n >= max_out || n >= 20) break;
+    if (n >= max_out || n >= POLL_BATCH_MAX) break;
     JsonObject author = m["author"];
     bool is_bot = author["bot"] | false;
     // Echo-loop guard: never surface our own posts (or any bot/webhook) as
@@ -256,6 +260,20 @@ bool discord_poll(const String& channel_id, const String& after_id,
     tmp[n].author_id   = author["id"].as<String>();
     tmp[n].author_name = author["username"].as<String>();
     tmp[n].is_bot      = is_bot;
+
+    // Reply target. message_reference always names the message; the full
+    // referenced_message is usually inlined too, which saves fetching it, but
+    // Discord does not promise to — it is only sent for reply-type messages and
+    // even then the backend may not have looked it up. Hence ref_present.
+    JsonObject ref = m["message_reference"];
+    if (!ref.isNull()) tmp[n].ref_id = ref["message_id"].as<String>();
+    JsonObject rm = m["referenced_message"];
+    if (!rm.isNull()) {
+      tmp[n].ref_present = true;
+      tmp[n].ref_content = rm["content"].as<String>();
+      tmp[n].ref_is_bot  = rm["author"]["bot"] | false;
+      if (tmp[n].ref_id.length() == 0) tmp[n].ref_id = rm["id"].as<String>();
+    }
     n++;
   }
   // reverse to oldest-first so the cursor advances monotonically
@@ -388,6 +406,20 @@ bool discord_delete_channel(const String& channel_id) {
   return (code >= 200 && code < 300) || code == 404;   // already gone is fine
 }
 
+// Deleting someone else's message needs MANAGE_MESSAGES, which the bot is not
+// given by default. The caller has to treat false as "still visible" and say so
+// rather than assuming the secret is gone.
+bool discord_delete_message(const String& channel_id, const String& message_id) {
+  if (channel_id.length() == 0 || message_id.length() == 0) return false;
+  String resp;
+  int code = http_request("DELETE", String(API_BASE) + "/channels/" +
+                          channel_id + "/messages/" + message_id, "", &resp);
+  if (code == 403)
+    Serial.println("[discord] cannot delete messages - the bot needs the "
+                   "Manage Messages permission");
+  return (code >= 200 && code < 300) || code == 404;   // already gone is fine
+}
+
 bool discord_channel_exists(const String& channel_id) {
   if (channel_id.length() == 0) return false;
   String resp;
@@ -396,17 +428,55 @@ bool discord_channel_exists(const String& channel_id) {
   return code >= 200 && code < 300;
 }
 
+// Fetch one message, for the case where a reply did not inline the message it
+// was replying to. Filtered like the channel listing so a message with a large
+// embed or attachment list cannot land a big allocation on us.
+bool discord_get_message(const String& channel_id, const String& message_id,
+                         String& content_out, bool& is_bot_out) {
+  content_out = "";
+  is_bot_out = false;
+  if (channel_id.length() == 0 || message_id.length() == 0) return false;
+
+  JsonDocument filter;
+  filter["content"] = true;
+  filter["author"]["bot"] = true;
+
+  JsonDocument doc;
+  int code = http_get_json(String(API_BASE) + "/channels/" + channel_id +
+                           "/messages/" + message_id, doc, filter);
+  if (code < 200 || code >= 300) return false;
+  content_out = doc["content"].as<String>();
+  is_bot_out  = doc["author"]["bot"] | false;
+  return true;
+}
+
+// Percent-encode an emoji for use in a reaction path.
+static String emoji_path(const String& emoji) {
+  String enc;
+  for (size_t i = 0; i < emoji.length(); i++) {
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%%%02X", (uint8_t)emoji[i]);
+    enc += buf;
+  }
+  return enc;
+}
+
+// Remove OUR OWN reaction. Deliberately the "@me" route, which needs no special
+// permission — removing somebody else's reaction would require MANAGE_MESSAGES.
+bool discord_unreact(const String& channel_id, const String& message_id,
+                     const String& emoji) {
+  if (channel_id.length() == 0 || message_id.length() == 0) return false;
+  String resp;
+  int code = http_request("DELETE", String(API_BASE) + "/channels/" +
+                          channel_id + "/messages/" + message_id +
+                          "/reactions/" + emoji_path(emoji) + "/@me", "", &resp);
+  return (code >= 200 && code < 300) || code == 404;
+}
+
 bool discord_react(const String& channel_id, const String& message_id,
                    const String& emoji) {
   if (channel_id.length() == 0 || message_id.length() == 0) return false;
-  // The emoji must be percent-encoded in the path.
-  String enc;
-  for (size_t i = 0; i < emoji.length(); i++) {
-    uint8_t c = (uint8_t)emoji[i];
-    char buf[4];
-    snprintf(buf, sizeof(buf), "%%%02X", c);
-    enc += buf;
-  }
+  String enc = emoji_path(emoji);
   String resp;
   int code = http_request("PUT", String(API_BASE) + "/channels/" + channel_id +
                           "/messages/" + message_id + "/reactions/" + enc + "/@me",

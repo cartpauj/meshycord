@@ -54,6 +54,11 @@ must be exactly six digits, between `100000` and `999999`.
    | Send Messages | Post mesh traffic |
    | Read Message History | Poll for your replies |
    | Manage Channels | Create channels and categories |
+   | Manage Messages | Delete a room-server password the moment it is read |
+
+   Without **Manage Messages** everything still works except that a password
+   you type stays in the channel history; the bridge will tell you so and ask
+   you to delete it yourself.
 
 7. Open the generated URL and authorise the bot into your server.
 
@@ -195,6 +200,14 @@ telling you what happened:
 | check mark | Delivered. The recipient acknowledged it |
 | cross | Failed, or no acknowledgement before the node's timeout |
 | satellite antenna | Transmitted. Group messages cannot be acknowledged in MeshCore, so delivery is unknown |
+| counterclockwise arrows | A resend is in flight; replaced by one of the above |
+
+A direct message gets its check or cross only when the recipient acknowledges,
+which can take up to two minutes. A channel message is marked transmitted
+immediately, because there is nothing to wait for.
+
+A cross is not the end of it — reply to the message with `retry` to send it
+again. See [Resending a message](#resending-a-message).
 
 MeshCore caps a message at 133 bytes. Longer text is split into up to three
 transmissions, two seconds apart. When that happens the bridge posts a notice
@@ -213,6 +226,28 @@ Anything over 375 characters of plain text is refused outright rather than
 truncated. Emoji cost four bytes each, so the practical limit is lower for
 those.
 
+### Resending a message
+
+**Reply** to the message and say `retry` (or `resend`). On mobile that is a
+swipe on the message; on desktop, hover it and pick Reply. The old marker is
+cleared and the new result lands on the original message, where you are already
+looking. The word `retry` itself never goes to the mesh.
+
+A counterclockwise-arrows marker appears while the resend is in flight and is
+replaced by the result. That matters for direct messages: those are only ticked
+once the recipient acknowledges, which can be up to two minutes, so without it
+the cross would simply vanish and nothing would seem to happen.
+
+Reply to your own message to send the whole thing again. Reply to a numbered
+`[2/3]` transmission from a split message to resend **only that piece** — which
+is usually what you want, since the others already landed.
+
+It is a reply rather than a reaction for a concrete reason. Reactions are only
+delivered over Discord's Gateway and cannot be polled for at all, so noticing
+one would mean re-fetching every failed message on every sweep. A reply is an
+ordinary message: it arrives on the poll that was happening anyway, it costs
+nothing extra, and it says exactly which message it means.
+
 ### Message history and catching up
 
 The companion holds a queue of messages that arrived while no client was
@@ -223,6 +258,9 @@ instead, so check your variant if catching up seems short.
 
 Room servers keep their own history separately, up to 32 posts, and push what
 you missed when you log in. That backfill arrives over the air at LoRa speed.
+It follows every successful login, including the automatic one after a
+reconnect, so it is the normal way a room catches up — see
+[Room servers need a login](#room-servers-need-a-login).
 
 Two things this does not do:
 
@@ -250,7 +288,7 @@ history then lives in Discord, which is a better place for it than a queue on a
 microcontroller. Switching back to the app is always possible, you just leave
 the history behind.
 
-### Forcing a route
+### Forcing the path
 
 MeshCore decides how to send a message on its own: it floods when it has no
 stored path for a contact, and follows the path when it has one. That is usually
@@ -275,15 +313,58 @@ A message that merely starts with those letters is left alone, so
 the path is relearned from the reply. It affects that message rather than being
 a permanent setting. `path:direct` is the default and is there for symmetry.
 
-The bridge replies with which route was actually used, taken from the node's own
-report rather than assumed.
+The bridge replies with whether the message flooded or followed the stored path,
+taken from the node's own report rather than assumed.
 
-There is no per-message route flag in the companion protocol, so this works by
+There is no per-message path flag in the companion protocol, so this works by
 clearing the path (`CMD_RESET_PATH`) before sending. Two consequences: it only
 applies to direct messages and room servers, since channel messages are not
 addressed to a contact and are always flooded; and it needs the recipient to be
 in the node's contact list, because clearing a path requires their full public
 key.
+
+### Room servers need a login
+
+A room server accepts posts only from someone logged in, so each one needs its
+password once. Everything else on the mesh does not: direct messages need no
+login at all, and mesh channels use a shared secret that lives on your node, so
+any channel your companion is already configured for just works.
+
+Link the room, then paste the command it gives you back into
+`#meshycord-admin` with the password on the end:
+
+```
+login 7 hunter2
+login a3f19c000000 hunter2
+```
+
+**Your message is deleted as soon as it has been read**, so the password does
+not stay in the channel history. That needs the bot to have **Manage Messages**;
+if it does not, the bridge says so and leaves the message for you to delete by
+hand. The password itself is kept on the device, so the session can be
+re-established without asking you again.
+
+`login <n>` with no password forgets the stored one. Unlinking a room forgets it
+too, and so does `reset`.
+
+The room replies over the air, so the verdict takes a few seconds and arrives in
+that room's own channel — either a confirmation, or a note that the password was
+rejected with the command ready to paste again.
+
+Two things worth knowing:
+
+* **A session does not last forever, and it does not survive a reconnect.** The
+  bridge logs in again whenever the Bluetooth link comes back, and again if a
+  post fails. Because the companion protocol does not pass the server's
+  keep-alive interval on, this is driven by what actually happens rather than by
+  a timer.
+* **Posting without a session fails silently on the mesh.** The send itself
+  succeeds and the post simply never appears. Rather than show that as a
+  delivered message, the bridge refuses it up front and tells you what to paste.
+
+Since the bridge borrows your node's identity, a session your phone established
+is one the bridge inherits — which is why a room can appear to work and then
+stop once that session lapses.
 
 ### The inbox
 
@@ -317,6 +398,14 @@ add a3f19c000000                     link by key, even for a stranger
 add 7 as control-net                 choose the Discord channel name
 remove 3                             unlink
 
+login 7 hunter2                      log in to a room server
+login 7                              forget its stored password
+
+contact find ridge                   search EVERY contact on the node
+contact list                         ...all of them
+contact add <64-hex-key> <name>      add a node seen on the public map
+contact remove 3                     delete a contact from the node
+
 tidy                                 move channels into their categories
 sync rooms                           link every room server, asks first
 reset                                delete everything the bridge made
@@ -330,6 +419,46 @@ ten minutes, so `add 7` always means the row you were looking at even if new
 contacts advert in meanwhile. After that it asks you to list again rather than
 acting on something stale. Every action names what it acted on, so a mistake is
 obvious and reversible.
+
+### Contacts on the node
+
+`list` and `find` show what the bridge has cached, which is only companions and
+room servers — on a 350-contact mesh that is about 95 of them. The rest are
+repeaters and sensors, deliberately skipped so they cannot push real senders out
+of the cache.
+
+The `contact` commands work on the node's own list instead, all of it:
+
+```
+contact find ridge      search every contact by name or key prefix
+contact list            all of them
+contact remove 3        delete one from the node
+```
+
+`contact find` scans the node live rather than reading the cache, so it takes a
+few seconds and it does see repeaters and sensors. It matches on the name or on
+the key prefix, so a key from a message is enough to find who it belongs to.
+
+Removal needs the **full 32-byte public key**, which no listing displays and
+nobody would retype — so a scan remembers the full keys of what it found, and a
+row number is enough. That numbering holds for ten minutes, like every other
+listing. `contact remove <64-hex-key>` also works if you have the key to hand.
+
+Removing a contact also drops its bridge link and forgets any stored room
+password. The Discord channel is left alone, as everywhere else. **A removed
+contact comes back the next time that node adverts** — this clears clutter, it
+does not block anyone.
+
+Adding requires a key and a name:
+
+```
+contact add f40e2949...4a91 North Ridge Relay
+contact add f40e2949...4a91 Ridge Room room
+```
+
+The name is not optional. Without one the contact is unnamed on the node, cannot
+be found by name afterwards, and any Discord channel created for it would be
+named after its key.
 
 ### Settings
 
@@ -509,6 +638,35 @@ truncated messages that passed the check.
 **NVS namespaces are `meshy` and `meshy_rt`.** Renaming them orphans every
 deployed device's settings.
 
+**Reactions cannot be received over REST.** They are Gateway-only, and there is
+no endpoint to poll for them — Discord's HTTP webhook events cover app
+authorization, entitlements and Social-SDK lobbies, nothing about messages. This
+is why resending is driven by a reply: a reply is an ordinary message that
+arrives on the poll already being made, and `message_reference` names its target.
+The same wall rules out modals, ephemeral replies and buttons, all of which need
+an interaction.
+
+**A login is answered by a push, not by the command reply.** `CMD_SEND_LOGIN`
+replies `RESP_CODE_SENT`, which only means the request went out over the air.
+The room's verdict arrives later as `PUSH_CODE_LOGIN_SUCCESS` (0x85) or
+`PUSH_CODE_LOGIN_FAIL` (0x86), both carrying the room's 6-byte key prefix.
+Treating the immediate reply as success reports every login as working.
+
+**The server's keep-alive interval is not passed on.** The node parses it from
+the room's response but the push frame does not carry it, so there is no expiry
+to schedule against. Sessions are re-established on events instead: whenever the
+BLE link returns, and whenever a post to that room finds no session.
+
+**Room passwords live under their own NVS key.** The route record is packed with
+`|` separators and a password is free text, so one pipe would silently shift
+every field after it. The key is `p` plus the 12-character prefix — 13
+characters, against an NVS limit of 15.
+
+**Delete the password message before anything else can fail.** `do_login()`
+deletes it first and only then parses, stores and transmits. Deleting a message
+the bot did not write needs `MANAGE_MESSAGES`, so the false return is meaningful
+and has to be surfaced rather than assumed.
+
 **Nothing may build a response proportional to the contact list.** The C3 has no
 PSRAM, and a single contiguous allocation of a few tens of KB is already most of
 the free heap once WiFi, TLS and NimBLE are up. Anything that renders per-contact
@@ -565,6 +723,7 @@ The device narrates what it does. Useful markers:
 [poll] full sweep: 2 channel(s) in ...   Discord polling, watch as links grow
 [ack] delivered in 2410ms                delivery confirmation
 [heap] free=..  largest=..  floor=..     watch largest, not just free
+[room] login a3f19c000000: OK        room server session established
 [wdt] watchdog armed, 90s timeout
 ```
 
