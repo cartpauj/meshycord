@@ -68,7 +68,7 @@ func seed(t *testing.T, db *store.Store) {
 			t.Fatalf("put route: %v", err)
 		}
 	}
-	if err := db.SetRoomPassword("aabbccddeeff", "hunter2"); err != nil {
+	if err := db.SetRoomPassword("aabbccddeeff", "fake-test-password"); err != nil {
 		t.Fatalf("room password: %v", err)
 	}
 
@@ -225,7 +225,7 @@ func TestContactFilters(t *testing.T) {
 func TestBotTokenIsNeverRendered(t *testing.T) {
 	srv, db, cfg := newTestServer(t)
 	seed(t, db)
-	const token = "MTIzNDU2Nzg5.SECRET.TOKENVALUE"
+	const token = "fake-bot-token-not-a-real-credential"
 	if err := cfg.SetBotToken(token); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestBotTokenIsNeverRendered(t *testing.T) {
 	}
 	// The room password must not leak either.
 	_, body := get(t, h, "/links")
-	if strings.Contains(body, "hunter2") {
+	if strings.Contains(body, "fake-test-password") {
 		t.Error("/links leaked a stored room password")
 	}
 }
@@ -258,7 +258,7 @@ func TestAuthIsOptionalUntilAPasswordIsSet(t *testing.T) {
 		t.Error("the missing-password banner is not shown")
 	}
 
-	if err := cfg.SetPassword("a-long-enough-password"); err != nil {
+	if err := cfg.SetPassword("fake-console-password"); err != nil {
 		t.Fatal(err)
 	}
 	code, _ = get(t, h, "/links")

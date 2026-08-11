@@ -1192,7 +1192,7 @@ func (b *Bridge) contactAddUsage(problem string) string {
 	return out + "Usage: `contact add <64-hex-key> <type> [+link] <name>`\n" +
 		"Type is " + contactTypeHelp + ", and it is required — getting it wrong is quiet rather " +
 		"than loud, so it is not guessed. `+link` also creates its Discord channel.\n" +
-		"```\ncontact add f40e29492972ac7f… room +link Tina_You_Fat_Lard\n```\n" +
+		"```\ncontact add a1b2c3d4e5f60718… room +link Ridge Room\n```\n" +
 		"_The key is the node's full public key, as shown on the public map. Already added one " +
 		"with the wrong type? `contact type <keyprefix> room` fixes it._"
 }

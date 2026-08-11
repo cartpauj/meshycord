@@ -84,7 +84,7 @@ func TestModalSubmitDecodes(t *testing.T) {
 	  "data": {
 	    "custom_id": "loginmodal:aabbccddeeff",
 	    "components": [{ "type": 1, "id": 1, "components": [
-	      { "type": 4, "id": 2, "custom_id": "password", "value": "hunter2" }
+	      { "type": 4, "id": 2, "custom_id": "password", "value": "fake-test-password" }
 	    ]}]
 	  },
 	  "member": { "user": { "id": "42", "username": "cartpauj" } }
@@ -94,7 +94,7 @@ func TestModalSubmitDecodes(t *testing.T) {
 	if err := json.Unmarshal(raw, &i); err != nil {
 		t.Fatalf("a modal submission failed to decode: %v", err)
 	}
-	if got := i.ModalValue("password"); got != "hunter2" {
+	if got := i.ModalValue("password"); got != "fake-test-password" {
 		t.Errorf("password = %q — the typed password never reached the bridge", got)
 	}
 }

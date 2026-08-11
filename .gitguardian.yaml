@@ -1,0 +1,24 @@
+# GitGuardian / ggshield configuration.
+#
+# Nothing secret belongs in this repository at all: the Discord bot token, the
+# console password and every room-server password live in the SQLite database on
+# the device, outside the source tree. See the Configuration section of the
+# README.
+#
+# So anything a scanner finds here is a test fixture. The three incidents that
+# prompted this file were a fake bot token and two fake passwords in _test.go
+# files, all of which exist precisely to prove that credentials do NOT leak —
+# TestBotTokenIsNeverRendered sets a token and then asserts no page renders it
+# back. A scanner cannot tell that apart from a real one, which is fair.
+#
+# Test fixtures are excluded rather than the findings individually ignored: a
+# per-match ignore goes stale the moment a fixture value changes, and would need
+# renewing for every new test that needs a password to test password handling.
+version: 2
+
+secret:
+  ignored-paths:
+    - "**/*_test.go"
+    # Vendored, minified, and not ours to edit — its base64 and long identifiers
+    # read as high entropy to any scanner.
+    - "internal/web/static/htmx.min.js"

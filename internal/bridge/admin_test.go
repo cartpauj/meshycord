@@ -180,7 +180,7 @@ func TestUnlinkForgetsTheRoomPassword(t *testing.T) {
 	if _, err := db.PutRoute(store.KindRoom, "b2b2b2b2b2b2", "chan-room", "Ridge Room"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetRoomPassword("b2b2b2b2b2b2", "hunter2"); err != nil {
+	if err := db.SetRoomPassword("b2b2b2b2b2b2", "fake-test-password"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -227,11 +227,11 @@ func TestLoginStoresAndForgetsAPassword(t *testing.T) {
 	b, db := newTestBridge(t)
 	seedBridge(t, db)
 
-	got := exec(t, b, "login b2b2b2b2b2b2 hunter2")
+	got := exec(t, b, "login b2b2b2b2b2b2 fake-test-password")
 	if !strings.Contains(got, "Password stored") {
 		t.Fatalf("login said %q", got)
 	}
-	if db.RoomPassword("b2b2b2b2b2b2") != "hunter2" {
+	if db.RoomPassword("b2b2b2b2b2b2") != "fake-test-password" {
 		t.Error("the password was not stored")
 	}
 	// With no radio attached it must say it will log in later rather than
