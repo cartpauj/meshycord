@@ -16,12 +16,6 @@ history and its own web console.
 Runs on a **Raspberry Pi Zero W** (ARMv6) upward — Pi Zero 2 W, Pi 2/3/4/5, and
 any amd64 or i386 Linux box.
 
-> This is the successor to the ESP32-C3 firmware, which is preserved in full on
-> the `esp32-c3` branch and still runs on hardware. That version polls Discord's
-> REST API because an ESP32 cannot comfortably hold a websocket open, and almost
-> every limitation it has traces back to that one constraint. See
-> [What changed, and why](#what-changed-and-why).
-
 ---
 
 ## Install
@@ -227,10 +221,10 @@ Three things follow from that, and they are the cases worth knowing:
   work differently depending on whether the room happened to be logged in, which
   is not something you should have to think about.
 
-Replying `retry` used to do the same thing — that was the ESP32's only option,
-since reactions cannot be polled for. It is commented out rather than deleted
-while the reaction path is tried on its own; note that with it off, the words
-"retry" and "resend" are ordinary text and get transmitted like anything else.
+Replying `retry` to a message does the same thing, and is switched off — the code
+is there, commented out, while the reaction is tried on its own. Worth knowing
+because of the trade: with it off, "retry" and "resend" are ordinary words and
+get transmitted over the radio like any other text.
 
 ### Promoting a sender
 
@@ -368,8 +362,9 @@ systemctl restart meshycord
 ```
 
 The unit is `Type=notify` with a 120-second watchdog. If the process wedges,
-systemd restarts it — there is no watchdog scaffolding inside the application,
-because that approach is precisely what failed on the ESP32.
+systemd restarts it. Supervision is deliberately outside the process: a watchdog
+a program feeds itself is only as trustworthy as the program, and the case you
+need it for is exactly the case where the program has stopped being trustworthy.
 
 The `systemctl status` line reports live state:
 
@@ -418,56 +413,36 @@ project.
 
 ---
 
-## What changed, and why
+## Limitations
 
-The ESP32 version is not being abandoned because the code is bad. It ran on real
-hardware against a live ~350-node mesh. It is being left behind because of one
-hard ceiling: **an ESP32 cannot comfortably hold a websocket open, so it polls
-Discord's REST API.** Almost everything else follows from that.
-
-| | ESP32-C3 | This |
-|---|---|---|
-| Discord | REST polling | Gateway websocket |
-| Reply latency | 17–22 s sweep of 5 channels | instant |
-| Cost of more links | grows per link | flat |
-| Reactions | **impossible** — Gateway-only, no endpoint to poll | events; 🔄 resends |
-| Buttons, modals, ephemeral replies | **impossible** | yes |
-| Room passwords | typed in a channel, then deleted | private popup |
-| History | 256-message ring on the radio | SQLite, searchable |
-| Contact cache | capped at 192, repeaters dropped | uncapped, everything |
-| Web UI | cut to almost nothing for memory | full console |
-| Transports | BLE only | serial, BLE, TCP |
-| Recovery | hardware watchdog, fed by hand | systemd, `Restart=always` |
-
-Two of those deserve more than a table row.
-
-**Reactions cannot be received over REST.** Not "are slow to" — cannot. The
-complete webhook event list is twelve types, all about app authorization,
-entitlements, quests and Social-SDK lobbies. Discord's own wording is that
-events for channels, guilds, roles and messages "are only available over
-Gateway". There is no endpoint to poll for pending interactions.
-
-**The ESP32 had an unfixed hang.** As of its last commit the device
-watchdog-rebooted roughly 170 s after boot. The root cause is structural: one
-`loop()` where every operation blocks every other one, so a slow Discord request
-stalls the radio and a slow radio stalls Discord. This design makes that failure
-mode impossible — four independent goroutines, none of which can block another,
-and supervision moved outside the process entirely.
-
-### What did *not* change
-
-These are MeshCore, not the old hardware, and no amount of new hardware fixes
-them:
+These are MeshCore and Discord, not this bridge. Nothing here is a to-do list —
+they are the shape of what a bridge like this can and cannot do:
 
 - The companion serves **one client at a time**. The phone app cannot connect
-  while the bridge holds the link.
+  while the bridge holds the link, on any of the three transports.
 - **160 bytes** per message, less the node's own name on a group channel.
 - Group messages **cannot be acknowledged**, so delivery is never confirmable
-  for those.
+  for those. A ✅ there would claim something the protocol cannot prove.
 - **Only one route per received message is visible.** MeshCore deduplicates by
   packet hash below the app layer, so copies arriving by other routes are gone
   before the companion protocol sees them. The hop count shown describes one
   path, not all of them.
+- **Discord mentions do not translate.** A Discord account is not a mesh node, so
+  there is nothing sensible to turn one into. Use MeshCore's `@[Node Name]`.
+
+### Why the Gateway, and not just REST
+
+Worth stating plainly, because it is the one architectural choice everything else
+follows from: **reactions cannot be received over REST.** Not "are slow to" —
+cannot. Discord's complete webhook event list is twelve types, all concerning app
+authorization, entitlements, quests and Social-SDK lobbies. Discord's own wording
+is that events for channels, guilds, roles and messages "are only available over
+Gateway", and there is no endpoint to poll for pending interactions.
+
+So 🔄 resends, buttons, modals and ephemeral replies all require holding a
+websocket open. That is also what makes replies instant rather than as stale as
+your polling interval, and what makes the cost of another linked channel flat
+instead of another thing to sweep.
 
 ---
 
@@ -478,10 +453,10 @@ them:
 `tinygo.org/x/bluetooth`, and `github.com/godbus/dbus/v5`, which is how BlueZ is
 driven — Linux exposes Bluetooth over D-Bus and there is no way around that.
 No Discord library: REST is hand-written on
-`net/http` and the Gateway protocol implemented directly. The ESP32 version
-hand-wrote REST and that part was never the problem — the standard library gives
-TLS, keep-alive, connection pooling and JSON for free, so what is left is small
-enough to read in one sitting.
+`net/http` and the Gateway protocol implemented directly. The standard library
+already gives TLS, keep-alive, connection pooling and JSON, so what is left is
+small enough to read in one sitting — and this uses a narrow enough slice of
+Discord that a general-purpose library would mostly be surface area to learn.
 
 `modernc.org/sqlite` rather than `mattn/go-sqlite3` specifically because the
 latter needs cgo, which would make the ARMv6 build a cross-toolchain problem
@@ -509,12 +484,14 @@ Renaming a Discord channel can never break anything. Categories are the one
 exception, matched by name, because Discord offers no other way to find one.
 
 **Nothing is adopted, only created.** The bridge never claims or moves a channel
-it did not make. An earlier version moved one unconditionally and dragged a
-repurposed `#general` into its own category.
+it did not make. Matching a channel by name and then moving it is how a
+repurposed `#general` ends up dragged into someone else's category, and a bridge
+that rearranges a server it was invited into has overstepped.
 
 **SD-card longevity is taken seriously.** WAL mode, `synchronous=NORMAL`, writes
-only when something actually changed, logs to journald rather than a file, and
-none of the ESP32's per-poll persistence.
+only when something actually changed, and logs to journald rather than a file. A
+bridge that idles for weeks should not be quietly wearing out the card it boots
+from.
 
 See [PROTOCOL-NOTES.md](PROTOCOL-NOTES.md) for the companion protocol itself —
 byte layouts with firmware line references, and every gotcha that cost real
@@ -524,15 +501,17 @@ debugging.
 
 ## Credits
 
-Built by [cartpauj](https://github.com/cartpauj) with Claude (Opus 5) doing most
+Built by [cartpauj](https://github.com/cartpauj), with Claude (Opus 5) doing most
 of the typing.
 
-The same caveat as the ESP32 version, which has not stopped being true: the model
-writes the code, and it will confidently get protocol details wrong until you
-make it read the firmware. The 160-byte message ceiling in this document was
-carried over as 133 from notes nobody had checked, which quietly cost about a
-fifth of every transmission and split messages that would have fitted in one. It
-was found by reading `BaseChatMesh.h`, not by reading documentation.
+One thing worth passing on, because it cost real time: a model will write
+confident, plausible protocol code and get the details wrong until you make it
+read the firmware. The message ceiling in here was 133 bytes for a long while,
+sourced from documentation rather than from `BaseChatMesh.h`, where it is
+`10 * CIPHER_BLOCK_SIZE` — 160. That quietly wasted about a fifth of every
+transmission and split messages that would have fitted in one. Every gotcha in
+[PROTOCOL-NOTES.md](PROTOCOL-NOTES.md) has a firmware line reference for the same
+reason.
 
 ## Licence
 
