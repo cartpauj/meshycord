@@ -465,4 +465,7 @@ caught two bugs that would have failed silently at runtime.
 
 ## License
 
-MIT.
+GNU General Public License v3.0. See [LICENSE](LICENSE).
+
+Worth noting for anyone building on this: MeshCore itself is GPL v3, and this
+reads its source closely enough that GPL is the right fit regardless.
