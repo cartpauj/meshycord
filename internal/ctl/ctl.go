@@ -162,8 +162,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 
 	// A command crosses the mesh and back, so the deadline has to cover the
 	// whole round trip with room to spare rather than a typical socket's
-	// few seconds.
-	_ = conn.SetDeadline(time.Now().Add(3 * time.Minute))
+	// few seconds: a cold flood login plus the command's own reply, and then
+	// margin, so that this deadline is never what fails first.
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
 
 	var req Request
 	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&req); err != nil {

@@ -43,7 +43,15 @@ const CLIReplyTimeout = 45 * time.Second
 
 // cliLoginTimeout bounds the wait for an admin login verdict, which also
 // travels over the air.
-const cliLoginTimeout = 30 * time.Second
+//
+// Longer than it looks like it needs to be, and deliberately. The first login
+// after a restart has no stored route, so it floods: the request reaches the
+// repeater by every path at once and the answer comes back the same way.
+// Measured at 50 seconds on a live mesh, against a repeater three hops out
+// that answered a warm request in three. Thirty seconds turned that into "it
+// may be out of range" on the first command after every restart — advice that
+// was simply wrong, about a login that was working.
+const cliLoginTimeout = 90 * time.Second
 
 // ErrCLINoReply means the command went out and nothing came back. It is not
 // proof of failure: some commands never answer by design.
@@ -294,7 +302,9 @@ func (b *Bridge) ensureCLIAdmin(ctx context.Context, t CLITarget) error {
 		b.noteCLIAdmin(t.Key)
 		return nil
 	case <-time.After(cliLoginTimeout):
-		return fmt.Errorf("%s did not answer the login within %s — it may be out of range",
+		return fmt.Errorf("%s did not answer the login within %s.\n"+
+			"It may be out of range, or the mesh may simply be busy. The bridge keeps trying in "+
+			"the background, so running the command again shortly often just works.",
 			t.Label, cliLoginTimeout)
 	case <-ctx.Done():
 		return ctx.Err()

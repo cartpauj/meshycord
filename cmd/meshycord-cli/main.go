@@ -99,7 +99,12 @@ func plainText(s string) string {
 func buildRequest(command, login string, list, status, clock, clockSync bool, args []string) (ctl.Request, time.Duration, error) {
 	// The whole round trip crosses the mesh twice and may include a login
 	// first, so allow well beyond the daemon's own reply timeout.
-	const meshTimeout = 2 * time.Minute
+	//
+	// The daemon's own limits are the floor here: a cold flood login (90s) and
+	// then the command's reply (45s). Giving up before the daemon does would
+	// report a failure while the answer was still on its way, which is the
+	// most misleading thing this could do.
+	const meshTimeout = 4 * time.Minute
 
 	chosen := 0
 	for _, on := range []bool{command != "", login != "", list, status, clock, clockSync} {
