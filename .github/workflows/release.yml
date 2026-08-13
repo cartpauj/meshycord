@@ -86,7 +86,16 @@ jobs:
             -trimpath \
             -o out/meshycord \
             ./cmd/meshycord
-          file out/meshycord
+
+          # meshycord-cli ships alongside the daemon. It is a client of it: the
+          # radio serves one program at a time, so running a repeater command
+          # by hand means asking the running bridge to send it.
+          go build \
+            -ldflags="-s -w -X main.Version=${{ steps.ver.outputs.tag }}" \
+            -trimpath \
+            -o out/meshycord-cli \
+            ./cmd/meshycord-cli
+          file out/meshycord out/meshycord-cli
           ls -la out/
 
       - name: Install nfpm
@@ -102,6 +111,7 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
           ARCH: ${{ matrix.target.deb_arch }}
           GO_BINARY: out/meshycord
+          GO_CLI_BINARY: out/meshycord-cli
         run: |
           # nfpm cannot template the output filename in config, so --target
           # carries a full path when we need a custom name. ARMv6 and ARMv7
@@ -120,6 +130,7 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
           ARCH: ${{ matrix.target.rpm_arch }}
           GO_BINARY: out/meshycord
+          GO_CLI_BINARY: out/meshycord-cli
         run: |
           nfpm package --packager rpm --target out/ --config deploy/nfpm.yaml
           ls -la out/
@@ -129,7 +140,7 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           # For anyone not on a systemd distro, or who just wants the binary.
-          tar -C out -czf "out/meshycord_${VERSION}_linux_${{ matrix.target.name }}.tar.gz" meshycord
+          tar -C out -czf "out/meshycord_${VERSION}_linux_${{ matrix.target.name }}.tar.gz" meshycord meshycord-cli
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

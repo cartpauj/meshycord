@@ -25,6 +25,9 @@ var (
 	// ErrNotContact means a command needed a full public key and the contact
 	// is not in the node's list, so the prefix could not be resolved.
 	ErrNotContact = errors.New("meshcore: not a known contact on the node")
+	// ErrClockBackwards means the node refused a time that is earlier than the
+	// one it already holds. MeshCore clocks only ever move forwards.
+	ErrClockBackwards = errors.New("meshcore: the node will not move its clock backwards")
 )
 
 // DefaultCommandTimeout is the per-command ceiling suggested by the MeshCore
@@ -383,10 +386,49 @@ func (s *Session) handshake(ctx context.Context) error {
 	}
 	// A node with no RTC boots at the epoch, which makes every message
 	// timestamp meaningless. The bridge has a real clock; hand it over.
-	if err := s.do(ctx, EncodeSetDeviceTime(time.Now()), 3*time.Second, anyReply); err != nil {
-		s.log.Debug("could not set the node's clock", "err", err)
-	}
+	//
+	// Read it back first, purely so the drift can be reported. This matters
+	// more than it looks: the node's clock is what gets stamped on a remote
+	// CLI command, so `clock sync` against a repeater copies THIS clock onto
+	// the repeater. A node running fast quietly propagates its error across
+	// the mesh, and — because no MeshCore clock will move backwards — every
+	// node it touches then needs a USB cable to undo it.
+	s.syncClock(ctx)
 	return nil
+}
+
+// syncClock hands the bridge's time to the node, and says so loudly when it
+// cannot. Best-effort: a node that will not answer is not a failed handshake.
+func (s *Session) syncClock(ctx context.Context) {
+	now := time.Now()
+
+	// Short leash on the read. It buys a log line and nothing else, and it sits
+	// in the handshake behind the command mutex — a node that ignores it must
+	// not cost every connect the full command timeout.
+	readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	before, readErr := s.DeviceTime(readCtx)
+	cancel()
+
+	if err := s.SetDeviceTime(ctx, now); err != nil {
+		if errors.Is(err, ErrClockBackwards) && readErr == nil {
+			s.log.Warn("the node's clock is AHEAD of this machine and MeshCore clocks cannot be "+
+				"wound back; message timestamps will be wrong, and `clock sync` to a repeater "+
+				"would copy this wrong time onto it. Fix it with `clkreboot` over USB, then "+
+				"reconnect.",
+				"node_utc", before.UTC().Format(time.RFC3339),
+				"ahead_by", before.Sub(now).Round(time.Second))
+			return
+		}
+		s.log.Debug("could not set the node's clock", "err", err)
+		return
+	}
+	if readErr == nil {
+		if drift := now.Sub(before); drift > 30*time.Second {
+			s.log.Info("corrected the node's clock",
+				"was_behind_by", drift.Round(time.Second),
+				"now_utc", now.UTC().Format(time.RFC3339))
+		}
+	}
 }
 
 // anyReply accepts whatever comes back. Used for commands where the reply
@@ -495,6 +537,57 @@ func (s *Session) SendDM(ctx context.Context, prefixHex, text string) (SendResul
 		return SendResult{}, err
 	}
 	return DecodeSendResult(f)
+}
+
+// SendCLI sends a remote CLI command to a repeater or room server.
+//
+// This only puts the command on the air. The output comes back later and
+// out-of-band, as an ordinary inbound message carrying TxtTypeCLIData, which
+// means the caller has to match the reply to the request itself — the protocol
+// offers nothing to correlate them with. The bridge does that by target.
+//
+// The returned SendResult carries no usable ack handle: the companion firmware
+// sets expected_ack to 0 for CLI messages, deliberately (MyMesh.cpp:1100), so
+// there is no delivery confirmation to wait for. The reply arriving IS the
+// confirmation, and its absence is the only failure signal there is.
+func (s *Session) SendCLI(ctx context.Context, prefixHex, command string) (SendResult, error) {
+	prefix, err := ParsePrefix(prefixHex)
+	if err != nil {
+		return SendResult{}, err
+	}
+	payload, err := EncodeSendCLICmd(prefix, command, time.Now())
+	if err != nil {
+		return SendResult{}, err
+	}
+	f, err := s.expect(ctx, payload, RespSent, DefaultCommandTimeout)
+	if err != nil {
+		return SendResult{}, err
+	}
+	return DecodeSendResult(f)
+}
+
+// DeviceTime reads the node's real-time clock.
+func (s *Session) DeviceTime(ctx context.Context) (time.Time, error) {
+	f, err := s.expect(ctx, []byte{CmdGetDeviceTime}, RespCurrTime, DefaultCommandTimeout)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return DecodeCurrTime(f)
+}
+
+// SetDeviceTime sets the node's real-time clock.
+//
+// Returns ErrClockBackwards when the node refuses because its own clock is
+// already ahead of t. That is not a transient failure and retrying will not
+// help: the firmware has no way to wind a clock back, so a node that has
+// picked up a bogus future time stays wrong until it is rebooted with
+// `clkreboot` over USB.
+func (s *Session) SetDeviceTime(ctx context.Context, t time.Time) error {
+	_, err := s.expect(ctx, EncodeSetDeviceTime(t), RespOK, DefaultCommandTimeout)
+	if errors.Is(err, ErrRejected) {
+		return ErrClockBackwards
+	}
+	return err
 }
 
 // SendChannel sends a group message to one of the node's channel slots.

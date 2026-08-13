@@ -50,6 +50,12 @@ if command -v systemctl >/dev/null 2>&1; then
 
       meshycord -list-ports
 
+  To administer a repeater over the air, from this shell:
+
+      sudo meshycord-cli -list
+      sudo meshycord-cli -login <repeater> <admin-password>
+      sudo meshycord-cli -c "clock" <repeater>
+
   Logs:    journalctl -u meshycord -f
   Status:  systemctl status meshycord
 

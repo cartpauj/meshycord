@@ -434,3 +434,69 @@ serves one client at a time.** While the bridge holds the link, the phone app
 cannot connect to the same node. This is MeshCore, not the transport and not
 the chip — it is the same over serial, BLE and TCP, and there is no working
 around it.
+
+This is also the whole reason `meshycord-cli` is a client of the daemon rather
+than a program that opens the radio itself. There is no second slot to take.
+
+## Remote CLI (`TXT_TYPE_CLI_DATA`)
+
+**There is no command for running a CLI command.** Reading the full command
+list in `examples/companion_radio/MyMesh.cpp` (1–65 on `main`) turns up nothing
+of the sort, and the companion protocol documentation has no such section
+either. What exists instead is a text message with one byte changed.
+
+`CMD_SEND_TXT_MSG` carries a `txt_type`, and the values are:
+
+```
+0  TXT_TYPE_PLAIN         chat
+1  TXT_TYPE_CLI_DATA      a command line
+2  TXT_TYPE_SIGNED_PLAIN  a room post, with the author's key prefix
+```
+
+Send `txt_type = 1` to a repeater and it does not store the text as chat: it
+runs it through `CommonCLI::handleCommand` and replies with the output as
+another `TXT_TYPE_CLI_DATA` message (`simple_repeater/MyMesh.cpp:683`, and
+`companion_radio/MyMesh.cpp:534` on the way back in). That is the entire remote
+administration mechanism.
+
+Four things about it are not obvious and all four cost real work to establish:
+
+**It needs an ADMIN login, and says nothing when it does not have one.** The
+check is `client->isAdmin()` in the same condition that matches the message
+type, so a guest session — which logs in perfectly happily — falls through to
+nothing at all. No error, no reply, no acknowledgement. Identical, from the
+sending end, to a repeater that is out of range. A repeater reports admin in
+two places (`reply_data[6]` legacy `is_admin`, `reply_data[7]` ACL), so both
+are worth consulting; older firmware fills in only the first.
+
+**Nothing correlates a reply with its command.** No request id, no sequence
+number. The output arrives as an inbound message from that node some seconds
+later, and the only thing tying it to what was asked is that it came from the
+node that was asked. Hence one command in flight per target, enforced by the
+bridge — two at once and the answers could be matched up the wrong way round.
+
+**The sender's timestamp is overwritten, which changes what `clock sync`
+means.** For a CLI message the companion substitutes its own RTC
+(`MyMesh.cpp:1098`) so a wrong client clock cannot trip the far end's replay
+protection. The repeater's `clock sync` then sets itself from `sender_timestamp`
+— which is the *companion node's* clock, never the bridge machine's. A node
+running fast propagates its error to every repeater it syncs, and since no
+MeshCore clock will move backwards (`MyMesh.cpp:1240`, and the same rule in
+`CommonCLI.cpp:216`), undoing that needs `clkreboot` over USB on each one.
+`time <epoch>` takes an explicit value and bypasses both RTCs, which is why
+that is the safer command for setting a repeater from a machine with real time.
+
+**Silence is a legitimate outcome.** `reboot` and `poweroff` are gone before a
+reply could leave. The firmware also sends nothing when it decides a message is
+a retry (`is_retry` → empty reply). So a timeout cannot be reported as failure;
+it means "no answer", which is a different thing.
+
+### There is no CLI for the locally attached node
+
+Worth stating plainly, because it is the obvious thing to want. The node on the
+end of the USB cable cannot be given CLI commands over the companion protocol —
+no firmware version has a command for it. Its text CLI exists only in **CLI
+Rescue** mode (`MyMesh.cpp:2020`), which reads lines straight off `Serial`,
+which is the same port the binary protocol uses. The two cannot coexist. Setting
+that node's name, radio parameters or clock is done with the real commands
+(`CMD_SET_ADVERT_NAME`, `CMD_SET_RADIO_PARAMS`, `CMD_SET_DEVICE_TIME`, …).

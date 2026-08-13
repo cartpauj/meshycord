@@ -13,6 +13,11 @@ One static binary. No runtime to install, no virtualenv, no npm, no separate
 daemon. It owns the radio link, the Discord Gateway, the routing, the message
 history and its own web console.
 
+(A second small binary, `meshycord-cli`, ships alongside it for
+[administering repeaters from the shell](#administering-a-repeater-from-the-shell).
+It is a client of the one above, not another daemon — it holds nothing and
+does nothing on its own.)
+
 Runs on a **Raspberry Pi Zero W** (ARMv6) upward — Pi Zero 2 W, Pi 2/3/4/5, and
 any amd64 or i386 Linux box.
 
@@ -104,6 +109,7 @@ The service starts automatically and listens on port **9150** — for the 915 MH
 git clone https://github.com/cartpauj/meshycord
 cd meshycord
 CGO_ENABLED=0 go build -o meshycord ./cmd/meshycord
+CGO_ENABLED=0 go build -o meshycord-cli ./cmd/meshycord-cli
 ```
 
 Go 1.26 or newer. `CGO_ENABLED=0` is not a habit — it is what makes the binary
@@ -556,6 +562,73 @@ Messages**, or remove the 🔄 by hand before adding it again.
 It has to be in the radio's contact list. If its adverts do not reach you, add
 it from its full public key with `/mesh contact-add` — the 12-character prefix
 shown next to a message is not enough.
+
+### Administering a repeater from the shell
+
+`meshycord-cli` runs MeshCore CLI commands on a repeater or room server over
+the air, from the machine running the bridge:
+
+```sh
+sudo meshycord-cli -list                                  # what can I talk to?
+sudo meshycord-cli -login ridge-repeater <admin-password> # store it once, verified
+sudo meshycord-cli -c "clock" ridge-repeater
+sudo meshycord-cli -c "neighbors" ridge-repeater
+sudo meshycord-cli -c "advert" ridge-repeater
+```
+
+It is a client of the running bridge, not a second one. The radio serves
+[one program at a time](#limitations), and the bridge holds that slot — so the
+CLI hands the command to the daemon over a local socket (`/run/meshycord/`,
+root-only) and prints what comes back. **If meshycord is not running, this does
+not work.** There is no radio to borrow.
+
+Three things to know before relying on it:
+
+- **It needs the repeater's ADMIN password**, not the guest one. A guest login
+  is accepted and then every command is discarded in silence — no error, no
+  reply, indistinguishable from a repeater that is out of range. `-login`
+  verifies the password immediately rather than letting you find out later.
+- **The repeater must be a contact on your node**, because a login needs its
+  full 64-hex key. Add it with `contact add <key> repeater <name>`.
+- **Silence is a normal outcome for some commands.** `reboot` and `poweroff`
+  are gone before a reply could leave. That exits `3`, not `1`, so a script can
+  tell "no answer" from "it failed".
+
+`sudo` because the socket is root-only: anything that can open it can reboot
+every repeater you have a password for.
+
+### Clocks, and why `clock sync` may not do what you expect
+
+MeshCore keeps every clock in UTC and has no concept of a timezone. A repeater
+in Denver reporting `21:04 UTC` at three in the afternoon is correct.
+
+The catch is which clock a repeater copies. `clock sync` sets it from the
+**USB node's** clock — not the machine running meshycord. The node stamps the
+message with its own RTC and there is no way to override that. So a node
+running fast quietly spreads its error to every repeater you sync, and MeshCore
+clocks never move backwards, so undoing it means `clkreboot` over USB on each
+one.
+
+meshycord sets the attached node's clock on every connect, and warns loudly if
+it cannot. To check and correct it by hand:
+
+```sh
+sudo meshycord-cli -clock        # node vs this machine, in UTC and local time
+sudo meshycord-cli -clock-sync   # set the node from this machine
+```
+
+Or bypass both clocks and send an explicit value, which is the safer habit when
+this machine has real time and the node may not:
+
+```sh
+sudo meshycord-cli -c "time $(date +%s)" ridge-repeater
+```
+
+There is **no CLI for the node on the end of your USB cable** — MeshCore has no
+such command in any firmware version. Its own CLI exists only in USB "CLI
+Rescue" mode, which replaces the binary protocol and so cannot run while the
+bridge is connected. Its name, radio settings and clock are set through the
+real protocol commands instead.
 
 ### Backups
 

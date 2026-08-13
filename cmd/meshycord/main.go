@@ -20,6 +20,7 @@ import (
 
 	"meshycord/internal/bridge"
 	"meshycord/internal/config"
+	"meshycord/internal/ctl"
 	"meshycord/internal/meshcore"
 	"meshycord/internal/sdnotify"
 	"meshycord/internal/server"
@@ -33,6 +34,7 @@ func main() {
 	var (
 		listen    = flag.String("listen", "0.0.0.0:9150", "address for the web console")
 		dbPath    = flag.String("db", "/var/lib/meshycord/db.sqlite", "path to the database")
+		ctlPath   = flag.String("ctl", ctl.DefaultSocket, "path to the control socket meshycord-cli connects to; empty disables it")
 		logLevel  = flag.String("log-level", "info", "debug, info, warn or error")
 		showVer   = flag.Bool("version", false, "print the version and exit")
 		listPorts = flag.Bool("list-ports", false, "list serial devices that look like a MeshCore node, and exit")
@@ -151,6 +153,29 @@ func main() {
 			}
 		}
 	}()
+
+	// The control socket, for meshycord-cli.
+	//
+	// Same rule as the web console: this is a management surface, not the job.
+	// If it cannot bind, say so and carry on bridging — losing the ability to
+	// run a repeater command by hand is not a reason to stop relaying
+	// messages.
+	if *ctlPath != "" {
+		ctlSrv := ctl.NewServer(*ctlPath, br.ControlHandler(), log)
+		if err := ctlSrv.Listen(); err != nil {
+			log.Error("the control socket is not available; meshycord-cli will not work, "+
+				"but the bridge itself is unaffected", "socket", *ctlPath, "err", err)
+			db.LogEvent("error", "system", "control socket unavailable: "+err.Error())
+		} else {
+			log.Info("control socket ready", "socket", ctlSrv.Path())
+			defer ctlSrv.Close()
+			go func() {
+				if err := ctlSrv.Serve(ctx); err != nil && ctx.Err() == nil {
+					log.Error("the control socket stopped", "err", err)
+				}
+			}()
+		}
+	}
 
 	// Tell systemd we are up, then heartbeat.
 	//

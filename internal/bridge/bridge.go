@@ -43,6 +43,14 @@ type Bridge struct {
 	roomMu sync.Mutex
 	rooms  map[string]*roomSession
 
+	// Remote CLI state. Kept apart from the room machinery above because a
+	// repeater is not a room: nothing here queues posts, announces itself in a
+	// Discord channel, or survives the link dropping. See nodecli.go.
+	cliMu      sync.Mutex
+	cliWaiters map[string]*cliPending
+	cliLogins  map[string]chan meshcore.LoginResult
+	cliAdminAt map[string]time.Time
+
 	// snapshots freeze listing numbering, so `add 7` always means the row you
 	// saw. Keyed by whoever asked, so two people listing at once do not
 	// renumber each other's rows.
@@ -109,6 +117,9 @@ func New(cfg *config.Store, db *store.Store, log *slog.Logger) *Bridge {
 		cats:             map[string]string{},
 		pending:          map[uint32]*pendingSend{},
 		rooms:            map[string]*roomSession{},
+		cliWaiters:       map[string]*cliPending{},
+		cliLogins:        map[string]chan meshcore.LoginResult{},
+		cliAdminAt:       map[string]time.Time{},
 		snapshots:        map[string]*listSnapshot{},
 		events:           make(chan gatewayEvent, 256),
 		interactionSlots: make(chan struct{}, 8),
@@ -342,6 +353,9 @@ func (b *Bridge) onMeshDisconnect() {
 		s.loggedIn = false
 	}
 	b.roomMu.Unlock()
+	// Admin sessions for remote CLI go the same way, and for the same reason:
+	// a stale one means commands are discarded in silence.
+	b.forgetCLIAdmins()
 }
 
 // syncContacts mirrors the cache, deleting stragglers ONLY when the caller
@@ -489,6 +503,25 @@ func (b *Bridge) drainMesh(ctx context.Context, sess *meshcore.Session) {
 // relayInbound routes one mesh message into Discord and records it.
 func (b *Bridge) relayInbound(ctx context.Context, sess *meshcore.Session, m meshcore.Message) {
 	b.lastInbound.Store(time.Now().Unix())
+
+	// The output of a remote CLI command comes back as an ordinary inbound
+	// message, distinguished only by its text type. Hand it to whoever is
+	// waiting for it rather than posting a repeater's console output into a
+	// chat channel.
+	//
+	// If nobody is waiting it still must not be relayed as chat: an unsolicited
+	// one means a command timed out and its answer arrived late, or somebody
+	// ran a command from another client. Log it and stop.
+	if !m.IsChannel && m.TxtType == meshcore.TxtTypeCLIData {
+		if b.deliverCLIReply(m.PubKeyPrefix, m.Text) {
+			return
+		}
+		b.log.Info("a CLI reply arrived with nobody waiting for it",
+			"from", m.PubKeyPrefix, "text", meshcore.TruncateUTF8(m.Text, 120))
+		b.db.LogEvent("info", "cli", "late CLI reply from "+m.PubKeyPrefix+": "+
+			meshcore.TruncateUTF8(m.Text, 200))
+		return
+	}
 
 	dest, kind, key, label := b.destinationFor(ctx, sess, m)
 

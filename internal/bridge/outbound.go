@@ -1070,6 +1070,15 @@ func (b *Bridge) loginAllRooms(ctx context.Context, sess *meshcore.Session) {
 // markers say what happened. A rejection is final — a wrong password will not
 // fix itself on a retry — so it reports immediately and offers the popup.
 func (b *Bridge) handleLoginResult(ctx context.Context, r meshcore.LoginResult) {
+	// A login the remote-CLI code started belongs to it alone. Letting it fall
+	// through would drive the room state machine for a repeater that has no
+	// room channel, no queued posts and nothing to announce.
+	if b.deliverCLILogin(r) {
+		b.log.Info("admin login result", "key", r.Prefix, "ok", r.OK,
+			"admin", r.IsAdmin(), "role", meshcore.RoleName(r.Role()))
+		return
+	}
+
 	b.roomMu.Lock()
 	s := b.roomState(r.Prefix)
 	s.loggedIn = r.OK

@@ -99,6 +99,32 @@ const (
 // to whatever command happens to be outstanding.
 func IsPush(code byte) bool { return code >= 0x80 }
 
+// Text types. The byte that says what a message IS, carried in both directions
+// on CmdSendTxtMsg and on the message frames coming back.
+//
+// TxtTypeCLIData is the interesting one: a message with this type sent to a
+// repeater or room server you are ADMIN-logged-into is not chat, it is a
+// command line. The far node runs it through its own CommonCLI and sends the
+// text output back as another TxtTypeCLIData message. That is the entire
+// remote-administration mechanism — there is no separate command for it, and
+// no CLI command exists for the locally attached node at all.
+const (
+	TxtTypePlain       = 0
+	TxtTypeCLIData     = 1
+	TxtTypeSignedPlain = 2
+)
+
+// Error codes, carried as the second byte of a RespError frame.
+// From examples/companion_radio/MyMesh.cpp:130.
+const (
+	ErrCodeUnsupportedCmd = 1
+	ErrCodeNotFound       = 2
+	ErrCodeTableFull      = 3
+	ErrCodeBadState       = 4
+	ErrCodeFileIOError    = 5
+	ErrCodeIllegalArg     = 6
+)
+
 // Advert types — what a contact IS. From src/helpers/AdvertDataHelpers.h:7.
 const (
 	AdvTypeNone     = 0

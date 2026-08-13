@@ -9,6 +9,7 @@
 #                templatable in config — the workflow controls it with
 #                `--target <path>` instead.
 #   GO_BINARY  — path to the pre-built static binary for that arch
+#   GO_CLI_BINARY — path to the pre-built meshycord-cli binary for that arch
 #
 # nfpm expands ${VAR} natively in most top-level fields. contents[] entries need
 # `expand: true` per entry — without it the literal ${...} survives into the
@@ -48,6 +49,17 @@ suggests:
 contents:
   - src: ${GO_BINARY}
     dst: /usr/bin/meshycord
+    expand: true
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # meshycord-cli runs MeshCore commands on a repeater over the air. It is a
+  # client of the daemon above, not a second bridge — the radio serves one
+  # program at a time and the daemon holds that slot.
+  - src: ${GO_CLI_BINARY}
+    dst: /usr/bin/meshycord-cli
     expand: true
     file_info:
       mode: 0755

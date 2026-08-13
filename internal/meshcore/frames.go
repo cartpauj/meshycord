@@ -363,16 +363,50 @@ func DecodeSendResult(f []byte) (SendResult, error) {
 // Only the first 6 key bytes go on the wire, which is why a DM can be
 // addressed to someone who is not in the contact list at all.
 func EncodeSendTxtMsg(prefix []byte, text string, now time.Time) ([]byte, error) {
+	return encodeSendTxtMsg(prefix, text, now, TxtTypePlain)
+}
+
+// EncodeSendCLICmd builds a CmdSendTxtMsg carrying a remote CLI command.
+//
+// Same frame as a direct message with one byte changed, and that byte changes
+// everything about how the far end treats it: the repeater runs the text
+// through its CommonCLI and replies with the output instead of storing it as
+// chat (simple_repeater/MyMesh.cpp:683).
+//
+// Two things the caller must know, both learned from the firmware:
+//
+//   - The far node requires an ADMIN login. It checks `client->isAdmin()`
+//     before it will even look at the text, and a guest login connects
+//     perfectly happily and then ignores every command in silence.
+//   - The timestamp written here is DISCARDED. For a CLI message the
+//     companion node substitutes its own RTC (MyMesh.cpp:1098) so that its
+//     replay counter cannot be tripped by a client clock. It is still
+//     written, because the frame layout demands the field, but nothing
+//     downstream ever sees this value — which is why `clock sync` sets the
+//     repeater from the NODE's clock and not from ours. See SetDeviceTime.
+func EncodeSendCLICmd(prefix []byte, text string, now time.Time) ([]byte, error) {
+	return encodeSendTxtMsg(prefix, text, now, TxtTypeCLIData)
+}
+
+func encodeSendTxtMsg(prefix []byte, text string, now time.Time, txtType byte) ([]byte, error) {
 	if len(prefix) < 6 {
 		return nil, fmt.Errorf("meshcore: need at least 6 key bytes to address a message, got %d", len(prefix))
 	}
 	body := clampToLimit(text)
 	buf := make([]byte, 0, 1+1+1+4+6+len(body))
-	buf = append(buf, CmdSendTxtMsg, 0 /*txt_type: plain*/, 0 /*attempt*/)
+	buf = append(buf, CmdSendTxtMsg, txtType, 0 /*attempt*/)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(now.Unix()))
 	buf = append(buf, prefix[:6]...)
 	buf = append(buf, body...)
 	return buf, nil
+}
+
+// DecodeCurrTime parses a RespCurrTime frame: [0x09][epoch_seconds u32].
+func DecodeCurrTime(f []byte) (time.Time, error) {
+	if len(f) < 5 {
+		return time.Time{}, ErrShortFrame
+	}
+	return time.Unix(int64(binary.LittleEndian.Uint32(f[1:5])), 0), nil
 }
 
 // EncodeSendChannelTxtMsg builds CmdSendChannelTxtMsg (a group message).
@@ -545,6 +579,21 @@ func (r LoginResult) MayPost() bool {
 	return r.Role() >= ACLReadWrite
 }
 
+// IsAdmin reports whether the far node granted an ADMIN session, which is the
+// only kind that may run CLI commands. A repeater checks exactly this before
+// it will look at a TxtTypeCLIData message (simple_repeater/MyMesh.cpp:683),
+// and a guest session is accepted and then ignores every command in silence.
+//
+// Both fields are consulted because repeaters fill in both: the legacy
+// is_admin byte at [6] and the ACL byte at [7] (simple_repeater/MyMesh.cpp:139).
+// Older firmware sends only the first.
+func (r LoginResult) IsAdmin() bool {
+	if r.Perms == 1 {
+		return true
+	}
+	return r.HasExtra && r.Role() == ACLAdmin
+}
+
 // RoleName renders the granted role for humans.
 func RoleName(role byte) string {
 	switch role & ACLRoleMask {
@@ -598,6 +647,17 @@ func EncodeDeviceQuery() []byte { return []byte{CmdDeviceQuery} }
 
 // EncodeSetDeviceTime builds CmdSetDeviceTime. A node with no RTC boots at the
 // epoch, which makes every message timestamp useless until something sets it.
+//
+//	[0x06][epoch_seconds u32]
+//
+// Seconds since the epoch, so UTC by construction — MeshCore has no concept of
+// a timezone anywhere, and every clock reading a node or repeater prints is
+// UTC regardless of where it is standing.
+//
+// The node REFUSES to move its clock backwards: it compares against its own
+// RTC first and answers RespError/ErrCodeIllegalArg if t is earlier
+// (MyMesh.cpp:1240). A node that has landed in the future therefore cannot be
+// corrected with this at all — it needs `clkreboot` over USB.
 func EncodeSetDeviceTime(t time.Time) []byte {
 	buf := make([]byte, 5)
 	buf[0] = CmdSetDeviceTime

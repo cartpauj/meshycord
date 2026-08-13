@@ -125,6 +125,13 @@ func channelInfoFrame(idx byte, name string) []byte {
 	return f
 }
 
+func currTimeFrame(t time.Time) []byte {
+	f := make([]byte, 5)
+	f[0] = RespCurrTime
+	binary.LittleEndian.PutUint32(f[1:], uint32(t.Unix()))
+	return f
+}
+
 // defaultResponder answers the handshake and nothing else.
 func defaultResponder(extra func(cmd []byte) [][]byte) func([]byte) [][]byte {
 	return func(cmd []byte) [][]byte {
@@ -135,6 +142,8 @@ func defaultResponder(extra func(cmd []byte) [][]byte) func([]byte) [][]byte {
 			return [][]byte{{RespDeviceInfo, 3}}
 		case CmdSetDeviceTime:
 			return [][]byte{{RespOK}}
+		case CmdGetDeviceTime:
+			return [][]byte{currTimeFrame(time.Now())}
 		}
 		if extra != nil {
 			return extra(cmd)
@@ -695,5 +704,90 @@ func TestPartialEnumerationDoesNotForgetKnownContacts(t *testing.T) {
 	// And the room login path must still find its key.
 	if err := sess.RoomLogin(ctx, "f4f4f4f4f4f4", "pw"); errors.Is(err, ErrNotContact) {
 		t.Error("room login could not resolve a contact it had already seen")
+	}
+}
+
+func TestSendCLIMarksTheMessageAsCLIData(t *testing.T) {
+	node := newFakeNode(defaultResponder(func(cmd []byte) [][]byte {
+		if cmd[0] != CmdSendTxtMsg {
+			return nil
+		}
+		// expected_ack stays 0: the companion firmware never asks for an ack on
+		// a CLI message, so the reply coming back is the only proof of anything.
+		f := make([]byte, 10)
+		f[0] = RespSent
+		return [][]byte{f}
+	}))
+	sess := newTestSession(t, node)
+
+	res, err := sess.SendCLI(context.Background(), "aabbccddeeff", "clock")
+	if err != nil {
+		t.Fatalf("SendCLI: %v", err)
+	}
+	if res.ExpectedAck != 0 {
+		t.Errorf("ExpectedAck = %d, want 0 — CLI messages are never acked", res.ExpectedAck)
+	}
+
+	var sent []byte
+	for _, c := range node.commands() {
+		if c[0] == CmdSendTxtMsg {
+			sent = c
+		}
+	}
+	if sent == nil {
+		t.Fatal("no CmdSendTxtMsg reached the node")
+	}
+	if sent[1] != TxtTypeCLIData {
+		t.Fatalf("txt_type = %d, want %d — the far node would treat this as chat, not a command",
+			sent[1], TxtTypeCLIData)
+	}
+	if got := string(sent[13:]); got != "clock" {
+		t.Errorf("command text = %q, want %q", got, "clock")
+	}
+}
+
+// A node whose clock is ahead refuses to be corrected, and that has to be
+// distinguishable from every other rejection: it is the one case that needs a
+// USB cable rather than a retry.
+func TestSetDeviceTimeReportsARefusalToGoBackwards(t *testing.T) {
+	// Not defaultResponder: it answers the clock commands itself, so a refusal
+	// has to be wired in ahead of it.
+	node := newFakeNode(func(cmd []byte) [][]byte {
+		switch cmd[0] {
+		case CmdAppStart:
+			return [][]byte{selfInfoFrame("Ridge Node")}
+		case CmdSetDeviceTime:
+			return [][]byte{{RespError, ErrCodeIllegalArg}}
+		}
+		return nil
+	})
+	sess := newTestSession(t, node)
+
+	err := sess.SetDeviceTime(context.Background(), time.Now())
+	if !errors.Is(err, ErrClockBackwards) {
+		t.Errorf("err = %v, want ErrClockBackwards", err)
+	}
+}
+
+func TestDeviceTimeReadsTheNodeClock(t *testing.T) {
+	node := newFakeNode(func(cmd []byte) [][]byte {
+		switch cmd[0] {
+		case CmdAppStart:
+			return [][]byte{selfInfoFrame("Ridge Node")}
+		case CmdSetDeviceTime:
+			return [][]byte{{RespOK}}
+		case CmdGetDeviceTime:
+			return [][]byte{currTimeFrame(time.Unix(1786000000, 0))}
+		}
+		return nil
+	})
+	sess := newTestSession(t, node)
+
+	got, err := sess.DeviceTime(context.Background())
+	if err != nil {
+		t.Fatalf("DeviceTime: %v", err)
+	}
+	if !got.Equal(time.Unix(1786000000, 0)) {
+		t.Errorf("time = %v, want %v", got, time.Unix(1786000000, 0))
 	}
 }

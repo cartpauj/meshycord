@@ -33,6 +33,15 @@ ExecStart=/usr/bin/meshycord \
     -listen 0.0.0.0:9150 \
     -db /var/lib/meshycord/db.sqlite
 
+# /run/meshycord, for the control socket meshycord-cli connects to.
+#
+# systemd creates it on start and removes it on stop, so a stale socket from an
+# unclean shutdown cannot outlive the process and fool the CLI into reporting a
+# dead daemon as running. 0700: the socket carries repeater admin passwords, and
+# anyone who can open it can reboot every repeater on the mesh.
+RuntimeDirectory=meshycord
+RuntimeDirectoryMode=0700
+
 Restart=always
 RestartSec=5
 LimitNOFILE=4096

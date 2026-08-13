@@ -507,3 +507,111 @@ func TestMessageCeilingMatchesFirmware(t *testing.T) {
 		t.Errorf("MaxMsgLen = %d exceeds the packet payload budget", MaxMsgLen)
 	}
 }
+
+// A CLI command is a direct message with one byte changed. That byte is the
+// whole difference between chat and remote administration, so pin it down.
+func TestEncodeSendCLICmdSetsTheCLITextType(t *testing.T) {
+	prefix := []byte{0xde, 0xad, 0xbe, 0xef, 0x00, 0x11}
+	now := time.Unix(1786000000, 0)
+
+	cli, err := EncodeSendCLICmd(prefix, "clock", now)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	plain, err := EncodeSendTxtMsg(prefix, "clock", now)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	if cli[0] != CmdSendTxtMsg {
+		t.Errorf("command byte = 0x%02X, want 0x%02X", cli[0], CmdSendTxtMsg)
+	}
+	if cli[1] != TxtTypeCLIData {
+		t.Errorf("txt_type = %d, want %d (TxtTypeCLIData)", cli[1], TxtTypeCLIData)
+	}
+	if plain[1] != TxtTypePlain {
+		t.Errorf("plain txt_type = %d, want %d", plain[1], TxtTypePlain)
+	}
+	// Everything else must be byte-identical, or the far node reads a
+	// different recipient or timestamp than a normal message would carry.
+	if !bytes.Equal(cli[2:], plain[2:]) {
+		t.Errorf("frames differ beyond txt_type:\n cli   = %x\n plain = %x", cli[2:], plain[2:])
+	}
+}
+
+func TestEncodeSendCLICmdCarriesRecipientAndText(t *testing.T) {
+	prefix := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	f, err := EncodeSendCLICmd(prefix, "clock sync", time.Unix(1786000000, 0))
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if got := binary.LittleEndian.Uint32(f[3:7]); got != 1786000000 {
+		t.Errorf("timestamp = %d, want 1786000000", got)
+	}
+	if !bytes.Equal(f[7:13], prefix) {
+		t.Errorf("recipient = %x, want %x", f[7:13], prefix)
+	}
+	if got := string(f[13:]); got != "clock sync" {
+		t.Errorf("text = %q, want %q", got, "clock sync")
+	}
+}
+
+// Seconds since the epoch, so a node is set to UTC no matter what zone the
+// bridge machine is standing in. MeshCore has no timezone concept at all.
+func TestEncodeSetDeviceTimeIsEpochSecondsNotLocalTime(t *testing.T) {
+	mdt := time.FixedZone("MDT", -6*3600)
+	instant := time.Unix(1786000000, 0)
+
+	utc := EncodeSetDeviceTime(instant.UTC())
+	local := EncodeSetDeviceTime(instant.In(mdt))
+
+	if !bytes.Equal(utc, local) {
+		t.Errorf("the same instant encoded differently by zone:\n utc   = %x\n local = %x", utc, local)
+	}
+	if got := binary.LittleEndian.Uint32(utc[1:5]); got != 1786000000 {
+		t.Errorf("epoch = %d, want 1786000000", got)
+	}
+}
+
+func TestDecodeCurrTime(t *testing.T) {
+	f := []byte{RespCurrTime, 0, 0, 0, 0}
+	binary.LittleEndian.PutUint32(f[1:], 1786000000)
+
+	got, err := DecodeCurrTime(f)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.Equal(time.Unix(1786000000, 0)) {
+		t.Errorf("time = %v, want %v", got, time.Unix(1786000000, 0))
+	}
+	if _, err := DecodeCurrTime([]byte{RespCurrTime}); err != ErrShortFrame {
+		t.Errorf("short frame err = %v, want ErrShortFrame", err)
+	}
+}
+
+// Admin is the only role that may run CLI commands, and repeaters report it in
+// two places at once: the legacy is_admin byte and the newer ACL byte. Older
+// firmware fills in only the first, so both must count.
+func TestLoginResultIsAdmin(t *testing.T) {
+	cases := []struct {
+		name string
+		r    LoginResult
+		want bool
+	}{
+		{"legacy is_admin only", LoginResult{Perms: 1}, true},
+		{"acl admin", LoginResult{HasExtra: true, ACL: ACLAdmin}, true},
+		{"both agree", LoginResult{Perms: 1, HasExtra: true, ACL: ACLAdmin}, true},
+		{"guest", LoginResult{HasExtra: true, ACL: ACLGuest}, false},
+		// May post, but may NOT administer. This is the case that matters:
+		// the repeater accepts the login and then ignores every command.
+		{"read-write is not admin", LoginResult{HasExtra: true, ACL: ACLReadWrite}, false},
+		{"no role reported at all", LoginResult{}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.r.IsAdmin(); got != c.want {
+				t.Errorf("IsAdmin() = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

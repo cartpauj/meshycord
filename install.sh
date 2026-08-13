@@ -180,6 +180,16 @@ tar)
 	tar -xzf "${tmp}/${asset}" -C "$tmp" meshycord
 	install -m 0755 -o root -g root "${tmp}/meshycord" /usr/bin/meshycord
 
+	# meshycord-cli rides in the same tarball from this version on. Extracted
+	# separately and tolerantly, so upgrading FROM an older release — whose
+	# tarball holds only the daemon — still succeeds instead of aborting on a
+	# member that is not there.
+	if tar -xzf "${tmp}/${asset}" -C "$tmp" meshycord-cli 2>/dev/null; then
+		install -m 0755 -o root -g root "${tmp}/meshycord-cli" /usr/bin/meshycord-cli
+	else
+		warn '  this release has no meshycord-cli; skipping it'
+	fi
+
 	# The tarball is the binary alone, so the unit comes from the same tag —
 	# never from main, which may describe a unit this binary does not match.
 	if [ ! -f /etc/systemd/system/meshycord.service ] &&
