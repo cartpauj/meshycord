@@ -355,6 +355,21 @@ the changed attempt number keeps the packet distinct enough that the mesh does
 not discard it as a duplicate of the first try. Sending with a fresh timestamp
 instead is what would put the same text in the room twice.
 
+Two limits on that, both the protocol's:
+
+- **Only a room server deduplicates.** A person's node has no retry detection at
+  all — it queues whatever arrives and acknowledges it — so a direct message
+  whose acknowledgement was lost does land twice on their screen. Nothing at
+  either end can prevent that; a lost acknowledgement is indistinguishable from
+  a lost message.
+- **Only until something newer is sent.** A room accepts a timestamp at or after
+  the last one it took from you, so once a later message has gone to the same
+  room, the older one can no longer be repeated — it would be discarded with no
+  post and no acknowledgement. **A login counts**: it carries a timestamp too,
+  and the room stores it the same way. Those resends go out under a fresh
+  timestamp instead, which can arrive but can also duplicate. Resending promptly
+  is therefore worth something.
+
 Anything that already landed is not sent again at all. A resend of a split
 message puts only the missing pieces back on the air; the ones already
 acknowledged keep their ✅ and cost no airtime.
@@ -485,11 +500,42 @@ table holds 20 clients, and a new login displaces the least recently active
 non-admin.
 
 So the bridge does not log in on a timer. It keeps each room's login warm in the
-background every few hours, which also keeps it out of the eviction queue, and
-it treats an unacknowledged room post as the signal that the entry is gone —
-the next post logs in first. None of that is announced in Discord. A failed
-login only interrupts you when a message was actually waiting on it, or when
-the room says the password is wrong.
+background every few hours, which also keeps it out of the eviction queue. None
+of that is announced in Discord: a failed login only interrupts you when a
+message was actually waiting on it, or when the room says the password is wrong.
+
+**A single lost acknowledgement does not trigger a login**, and the reason is
+the retry contract. A login carries a timestamp, and the room stores it as the
+last one it has seen from you — so any login between two attempts makes the
+retry look like a brand new message, and it gets posted twice. A lost
+acknowledgement is treated as what it usually is, a lost packet, and retried the
+way the protocol intends. Three in a row is a different claim — that the room no
+longer has you at all — and is worth a login even at the cost of a duplicate.
+
+**A room can receive everything and acknowledge nothing.** It stores a route
+back to each client and sends acknowledgements down that route, flooding only
+when it has none. If the stored route does not work — and the reverse of a
+working route often does not, on a mesh where one direction carries further
+than the other — every post lands and every acknowledgement is lost, which
+looks exactly like a room that is out of range.
+
+Exactly one thing clears that route: a login that arrives **flooded**. Not a
+post, not a keep-alive, not an advert. And a login only floods when the sending
+node has no stored route of its own, which it always does after the first
+successful login, since the reply carries a path return.
+
+So when the bridge does log in after a run of failures, it clears its own path
+to the room first. That forces the login to flood, which is what makes the room
+forget the route it was whispering into. It happens in the background and says
+nothing. The room hands back a fresh route about half a second later, so this is
+a repair rather than a cure — but the fresh one is at least derived from a route
+that just worked.
+
+The same broken route shows up from the other side. A room re-sends a post it
+gets no acknowledgement for, and its retry carries a fresh packet timestamp so
+that the mesh's own duplicate check does not stop it — so the post arrives again
+looking new. An identical message from the same sender inside two minutes is
+therefore relayed into Discord once, not twice.
 
 ---
 

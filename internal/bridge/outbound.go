@@ -765,9 +765,25 @@ func (b *Bridge) transmitChunk(ctx context.Context, sess *meshcore.Session, req 
 		// keeps the packet distinguishable so the mesh does not drop it as a
 		// duplicate of the first try.
 		if prev, ok := b.db.LastSend(uiMessage); ok {
-			sent, attempt = prev.SentTS, prev.Attempt+1
-			b.log.Info("resending a message the far end may already have",
-				"attempt", attempt, "sent", sent.Unix())
+			if newest := b.newestSeenByPeer(req.Route); newest.After(prev.SentTS) {
+				// Something newer has gone to this peer since. A room server
+				// only accepts a timestamp at or after the last one it took
+				// from us, so repeating this older one would be discarded
+				// without a word — no post, no acknowledgement, and no way to
+				// tell that from being out of range.
+				//
+				// A fresh timestamp is the only thing that can still arrive.
+				// It costs the duplicate protection: if the first copy did
+				// land, this one lands beside it.
+				b.log.Info("resending under a new timestamp; the far end has seen "+
+					"something newer and would refuse the original as a replay",
+					"key", req.Route.MeshKey, "original", prev.SentTS.Unix(),
+					"newest", newest.Unix())
+			} else {
+				sent, attempt = prev.SentTS, prev.Attempt+1
+				b.log.Info("resending a message the far end may already have",
+					"attempt", attempt, "sent", sent.Unix())
+			}
 		}
 	}
 	rec.SentTS, rec.Attempt = sent, attempt
@@ -804,6 +820,38 @@ func (b *Bridge) transmitChunk(ctx context.Context, sess *meshcore.Session, req 
 	b.log.Info("discord -> mesh", "kind", string(req.Route.Kind), "key", req.Route.MeshKey,
 		"bytes", len(wire), "flood", res.Flooded, "ack", res.ExpectedAck)
 	return true, settled
+}
+
+// newestSeenByPeer is the latest timestamp this peer has accepted from us, as
+// far as we can tell — which decides whether a retry may still reuse its
+// original one.
+//
+// Our own messages are the obvious half. The other half is not obvious at all
+// and cost an evening: A LOGIN COUNTS. The room takes the timestamp off the
+// login packet and stores it as the last one seen from us
+// (simple_room_server/MyMesh.cpp:365), and it does that on every login, not
+// just the first — a password is supplied, so the "already in the ACL" shortcut
+// above it never runs.
+//
+// That timestamp comes from the NODE's clock at login time, so it is always
+// "now". Reuse an older timestamp afterwards and the room discards the post as
+// a replay: no post, no acknowledgement, nothing in any log. And since an
+// unacknowledged post triggers a repair login, every retry pushed the bar
+// further out of its own reach — a message could never be retried again once it
+// had failed once.
+func (b *Bridge) newestSeenByPeer(route store.Route) time.Time {
+	newest := b.db.NewestSentTS(route.MeshKey)
+	if route.Kind != store.KindRoom {
+		return newest
+	}
+	// Recorded when the verdict came back, so it is a shade later than the
+	// timestamp the room actually stored. Erring late is the safe direction:
+	// the cost is a retry that could have been deduplicated, against a retry
+	// the room will not look at.
+	if at, _ := b.db.LastLogin(route.MeshKey); at.After(newest) {
+		newest = at
+	}
+	return newest
 }
 
 // abandonRest fails every piece from `from` onward without transmitting any of
@@ -940,6 +988,9 @@ func (b *Bridge) handleConfirmation(ctx context.Context, c meshcore.Confirmation
 		_ = b.db.SetDelivery(p.rowID, store.DeliveryDelivered, c.RoundTrip)
 	}
 	p.resolve(true)
+	if p.route.Kind == store.KindRoom {
+		b.roomPostDelivered(p.route.MeshKey)
+	}
 	b.settleChunk(ctx, p.group, true, true)
 	if p.messageID != "" {
 		// For a room this upgrades the satellite to a tick, which is a real
@@ -1051,9 +1102,7 @@ func (b *Bridge) expirePending(ctx context.Context) {
 		// session is right: the next post logs in first, which costs a round
 		// trip and fixes the case where it matters.
 		if p.route.Kind == store.KindRoom {
-			b.forgetRoomSession(p.route.MeshKey)
-			b.log.Info("a room post was not acknowledged; assuming the login is gone",
-				"key", p.route.MeshKey)
+			b.roomPostFailed(p.route)
 		}
 
 		// Sent along a stored path and never acknowledged. That path is the
@@ -1347,6 +1396,10 @@ type roomSession struct {
 	// loggedInAt is when the room last confirmed a login, and doubles as when
 	// the keep-alive last refreshed it.
 	loggedInAt time.Time
+	// failedPosts counts unacknowledged posts in a row. A login resets the
+	// room's record of our last timestamp, which breaks retry deduplication, so
+	// it takes a run of failures rather than one to justify it.
+	failedPosts int
 	// lastReported throttles unattended failures. The keep-alive rediscovers a
 	// rejected password every few hours forever, and saying so every time is
 	// the noise this whole design is trying to avoid.
@@ -1655,6 +1708,103 @@ func roomRefreshDue(s *roomSession, every time.Duration) bool {
 		return false
 	}
 	return time.Since(s.loggedInAt) >= every && time.Since(s.lastAttempt) >= every
+}
+
+// roomPostFailedLimit is how many unacknowledged posts in a row it takes before
+// the bridge logs in again.
+//
+// Not one, and the reason is the whole retry contract. A retry reuses the
+// timestamp of the attempt before it, which is what lets the room recognise it
+// and refuse to post it twice — and a LOGIN overwrites the room's record of
+// that timestamp with the current one, so any login between attempts turns
+// every later retry into a new message. Logging in after a single failure meant
+// the first retry could never be deduplicated, which is exactly the duplicate
+// the contract exists to prevent.
+//
+// So a lost acknowledgement is treated as what it usually is — a lost packet —
+// and retried the way the official client retries. Three in a row is a
+// different claim: that the room no longer has us at all, which is worth a
+// login even at the cost of a possible duplicate.
+const roomPostFailedLimit = 3
+
+// roomPostFailed records an unacknowledged room post and, once there have been
+// enough of them, re-establishes the session.
+func (b *Bridge) roomPostFailed(route store.Route) {
+	b.roomMu.Lock()
+	s := b.roomState(route.MeshKey)
+	s.failedPosts++
+	n := s.failedPosts
+	enough := n >= roomPostFailedLimit
+	if enough {
+		s.failedPosts = 0
+		s.loggedIn = false
+		s.loggedInAt = time.Time{}
+	}
+	b.roomMu.Unlock()
+
+	if !enough {
+		b.log.Info("a room post was not acknowledged; leaving the session alone so a "+
+			"retry can still be recognised", "key", route.MeshKey, "in_a_row", n)
+		return
+	}
+	b.log.Info("room posts have gone unacknowledged repeatedly; logging in again",
+		"key", route.MeshKey, "in_a_row", n)
+	go b.repathRoom(route)
+}
+
+// roomPostDelivered clears the failure run for a room.
+func (b *Bridge) roomPostDelivered(prefix string) {
+	b.roomMu.Lock()
+	if s, ok := b.rooms[prefix]; ok {
+		s.failedPosts = 0
+	}
+	b.roomMu.Unlock()
+}
+
+// repathRoom makes a room forget the route it has been sending acknowledgements
+// down, by logging in again as a flood.
+//
+// This is the only lever the protocol offers, and the order is the whole trick.
+// A room stores a route back to each client and sends acknowledgements DOWN it,
+// flooding only when it has none (simple_room_server/MyMesh.cpp:494). Exactly
+// one thing clears that route:
+//
+//	if (packet->isRouteFlood()) client->out_path_len = OUT_PATH_UNKNOWN;   // :380
+//
+// and it is in the LOGIN handler alone. A post arriving flooded does not do it;
+// neither does a keep-alive or an advert. So the fix for a room that receives
+// everything and acknowledges nothing is a login that arrives flooded.
+//
+// Which is why the path is cleared first. sendLogin floods only when OUR node
+// has no stored route, and after any successful login it has one — the reply
+// carries a path return. So every login after the first goes out DIRECT,
+// isRouteFlood() is false, and the reset never fires. Clearing our own path is
+// what makes the login flood, and the flood is what clears theirs.
+//
+// Silent, and cheap: one login, subject to the same anti-storm interval and
+// attempt cap as any other. If the room is simply out of range this fails three
+// times quietly and nothing is said, because nothing new has gone wrong.
+func (b *Bridge) repathRoom(route store.Route) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	sess := b.link.Session()
+	if sess == nil {
+		return
+	}
+	if !b.db.HasRoomPassword(route.MeshKey) {
+		return // nothing to log in with
+	}
+
+	if err := sess.ResetPath(ctx, route.MeshKey); err != nil {
+		// Not fatal, but it does mean the login will go out direct and the
+		// room's route will survive it — worth seeing when this stops working.
+		b.log.Warn("could not clear the path before a repair login; it will not flood",
+			"key", route.MeshKey, "err", err)
+	}
+	b.log.Info("logging in again as a flood, to reset the room's route back to us",
+		"key", route.MeshKey, "room", route.Label)
+	b.tryRoomLogin(ctx, route.MeshKey)
 }
 
 // forgetRoomSession drops a session we have reason to believe is gone, so the

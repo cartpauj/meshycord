@@ -799,6 +799,25 @@ func (s *Store) LastSend(messageID string) (Message, bool) {
 	return m, true
 }
 
+// NewestSentTS is the latest timestamp put on the wire for a peer.
+//
+// A room server tracks the last timestamp it accepted from you and discards
+// anything older (`sender_timestamp >= client->last_timestamp`,
+// simple_room_server/MyMesh.cpp:449). So a retry can only reuse its original
+// timestamp while nothing newer has been sent to that peer since — past that
+// point the room would drop the retry in silence, and a fresh timestamp is the
+// only thing that can still get through.
+func (s *Store) NewestSentTS(meshKey string) time.Time {
+	var ts int64
+	err := s.db.QueryRow(`
+		SELECT MAX(sent_ts) FROM messages
+		WHERE mesh_key = ? AND direction = 'out' AND sent_ts != 0`, meshKey).Scan(&ts)
+	if err != nil || ts == 0 {
+		return time.Time{}
+	}
+	return time.Unix(ts, 0)
+}
+
 // StrandedSends lists outbound messages left waiting for an acknowledgement
 // that nothing is waiting on any more, which after a restart is all of them.
 //

@@ -91,6 +91,11 @@ type Bridge struct {
 	// and the Discord side try to run — whichever comes up second.
 	syncing atomic.Bool
 
+	// inbound holds recently relayed mesh messages, so a room re-sending a post
+	// it got no acknowledgement for does not post it into Discord twice.
+	inMu    sync.Mutex
+	inbound map[string]time.Time
+
 	// seen holds recently handled Discord message ids, so a Gateway RESUME
 	// that replays events cannot put the same text on the air twice.
 	seenMu sync.Mutex
@@ -103,6 +108,42 @@ type Bridge struct {
 	botUserID       atomic.Value // string
 	startedAt       time.Time
 	lastInbound     atomic.Int64
+}
+
+// inboundRepeatWindow is how long an identical message counts as a repeat.
+//
+// A room retries a push it got no acknowledgement for, three times, over about
+// a minute (PUSH_ACK_TIMEOUT_FLOOD and push_failures in simple_room_server).
+// Two minutes covers that with room to spare and is short enough that somebody
+// genuinely saying the same short thing twice still gets both.
+const inboundRepeatWindow = 2 * time.Minute
+
+// seenInbound reports whether this exact message has just been relayed, and
+// records it.
+func (b *Bridge) seenInbound(kind store.RouteKind, key, author, text string) bool {
+	if text == "" {
+		return false
+	}
+	k := string(kind) + "\x00" + key + "\x00" + author + "\x00" + text
+	now := time.Now()
+
+	b.inMu.Lock()
+	defer b.inMu.Unlock()
+	if b.inbound == nil {
+		b.inbound = map[string]time.Time{}
+	}
+	if at, ok := b.inbound[k]; ok && now.Sub(at) < inboundRepeatWindow {
+		return true
+	}
+	// Evicting on the way past keeps this bounded without a sweeper: the map
+	// only ever holds what has been said recently.
+	for old, at := range b.inbound {
+		if now.Sub(at) >= inboundRepeatWindow {
+			delete(b.inbound, old)
+		}
+	}
+	b.inbound[k] = now
+	return false
 }
 
 // gatewayEvent is one thing that happened in Discord, queued for the worker.
@@ -573,6 +614,17 @@ func (b *Bridge) relayInbound(ctx context.Context, sess *meshcore.Session, m mes
 	text := FormatInbound(m, label)
 	if body := FormatInboundBody(m, author); body != "" {
 		text += body
+	}
+
+	// A room re-sends a post it never got an acknowledgement for, and its retry
+	// carries a fresh packet timestamp to get past the mesh's own duplicate
+	// check — so the same post arrives again as if it were new. Ours is the
+	// only layer that can tell, by the one thing that does not change: who
+	// wrote it and what it said.
+	if b.seenInbound(kind, key, author, m.Text) {
+		b.log.Info("dropping a repeat of a message already relayed",
+			"key", key, "author", author)
+		return
 	}
 
 	rec := store.Message{

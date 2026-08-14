@@ -458,3 +458,218 @@ func TestStrandedSendsAreAnsweredAfterARestart(t *testing.T) {
 		t.Errorf("delivery = %q, want %q", delivery, store.DeliveryFailed)
 	}
 }
+
+// A retry may only reuse its original timestamp while nothing newer has gone to
+// the same peer.
+//
+// A room server accepts a timestamp at or after the last one it took from you
+// and silently discards anything older. So once a later message has been sent,
+// repeating an old timestamp would be refused with no post and no
+// acknowledgement — indistinguishable from the room being out of range.
+func TestRetryTimestampYieldsToNewerTraffic(t *testing.T) {
+	_, db := newTestBridge(t)
+	seedBridge(t, db)
+
+	const key = "b2b2b2b2b2b2"
+	older := time.Unix(1786000000, 0)
+	newer := time.Unix(1786000500, 0)
+
+	if _, err := db.InsertMessage(store.Message{
+		Direction: "out", Kind: store.KindRoom, MeshKey: key, Body: "first",
+		ChannelID: "chan", MessageID: "msg-1", SentTS: older, Attempt: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only that message so far: its own timestamp is the newest, so a retry can
+	// safely repeat it.
+	if got := db.NewestSentTS(key); !got.Equal(older) {
+		t.Fatalf("newest = %v, want %v", got, older)
+	}
+	prev, ok := db.LastSend("msg-1")
+	if !ok || !prev.SentTS.Equal(older) || prev.Attempt != 0 {
+		t.Fatalf("last send = %+v, ok=%v", prev, ok)
+	}
+
+	// Now something newer goes to the same room.
+	if _, err := db.InsertMessage(store.Message{
+		Direction: "out", Kind: store.KindRoom, MeshKey: key, Body: "second",
+		ChannelID: "chan", MessageID: "msg-2", SentTS: newer, Attempt: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.NewestSentTS(key); !got.Equal(newer) {
+		t.Errorf("newest = %v, want %v", got, newer)
+	}
+	// Which is what tells a resend of the first message to use a fresh
+	// timestamp rather than one the room will refuse.
+	if !db.NewestSentTS(key).After(prev.SentTS) {
+		t.Error("newer traffic was not detected, so the retry would be silently dropped")
+	}
+}
+
+// One unacknowledged room post must NOT log in again.
+//
+// A retry reuses the timestamp of the attempt before it, which is what lets the
+// room recognise it and refuse to post it twice — and a login overwrites the
+// room's record of that timestamp. So logging in after a single failure turns
+// the very next retry into a new message, which is the duplicate the whole
+// contract exists to prevent. It takes a run of failures to justify one.
+func TestOneUnackedRoomPostKeepsTheSession(t *testing.T) {
+	b, db := newTestBridge(t)
+	route := seedRoom(t, b, db)
+	recordREST(t, b)
+	ctx := context.Background()
+
+	b.roomMu.Lock()
+	s := b.roomState(route.MeshKey)
+	s.loggedIn, s.loggedInAt = true, time.Now()
+	b.roomMu.Unlock()
+
+	fail := func(ack uint32) {
+		b.pendMu.Lock()
+		b.pending[ack] = &pendingSend{
+			ack: ack, deadline: time.Now().Add(-time.Second), window: minAckWait,
+			channelID: route.ChannelID, messageID: "msg-1", route: route,
+		}
+		b.pendMu.Unlock()
+		b.expirePending(ctx)
+	}
+
+	fail(1)
+	if !b.roomLoggedIn(route.MeshKey) {
+		t.Fatal("one lost acknowledgement dropped the session; the next retry cannot be deduplicated")
+	}
+	fail(2)
+	if !b.roomLoggedIn(route.MeshKey) {
+		t.Fatal("two lost acknowledgements dropped the session")
+	}
+
+	// Three in a row is a different claim — that the room no longer has us —
+	// and is worth a login even at the cost of a possible duplicate.
+	fail(3)
+	if b.roomLoggedIn(route.MeshKey) {
+		t.Error("a run of failures did not re-establish the session")
+	}
+}
+
+// A delivery clears the run, so an occasional lost acknowledgement never
+// accumulates into a login.
+func TestADeliveryClearsTheFailureRun(t *testing.T) {
+	b, db := newTestBridge(t)
+	route := seedRoom(t, b, db)
+
+	b.roomMu.Lock()
+	b.roomState(route.MeshKey).failedPosts = 2
+	b.roomMu.Unlock()
+
+	b.roomPostDelivered(route.MeshKey)
+
+	b.roomMu.Lock()
+	n := b.roomState(route.MeshKey).failedPosts
+	b.roomMu.Unlock()
+	if n != 0 {
+		t.Errorf("failure run = %d after a delivery, want 0", n)
+	}
+}
+
+// The repair login is a no-op without a radio, rather than a panic on a nil
+// session — it runs from the acknowledgement sweep, which keeps going when the
+// link does not.
+func TestRepathIsQuietWithoutALink(t *testing.T) {
+	b, db := newTestBridge(t)
+	route := seedRoom(t, b, db)
+	b.repathRoom(route)
+
+	b.roomMu.Lock()
+	attempts := b.roomState(route.MeshKey).attempts
+	b.roomMu.Unlock()
+	if attempts != 0 {
+		t.Errorf("attempted a login with no link: attempts=%d", attempts)
+	}
+}
+
+// A login counts as traffic the room has seen from us.
+//
+// The room stores the login packet's timestamp as the last one accepted from
+// this client, on every login — so a retry that reuses an older timestamp after
+// one is discarded as a replay, silently. Since a failed post triggers a repair
+// login, missing this made a failed message impossible to ever retry.
+func TestALoginBlocksReuseOfAnOlderTimestamp(t *testing.T) {
+	b, db := newTestBridge(t)
+	route := seedRoom(t, b, db)
+
+	sent := time.Unix(1786676481, 0)
+	if _, err := db.InsertMessage(store.Message{
+		Direction: "out", Kind: store.KindRoom, MeshKey: route.MeshKey, Body: "hello",
+		ChannelID: route.ChannelID, MessageID: "msg-1", SentTS: sent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing else has happened: the retry may reuse its timestamp.
+	if got := b.newestSeenByPeer(route); got.After(sent) {
+		t.Errorf("newest = %v, want no later than %v", got, sent)
+	}
+
+	// Now a login goes out, which moves the room's idea of "latest" to now.
+	if err := db.RecordLogin(route.MeshKey, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.newestSeenByPeer(route); !got.After(sent) {
+		t.Error("a login did not count as newer traffic, so the retry would be " +
+			"silently discarded as a replay")
+	}
+
+	// A direct message has no such machinery — only rooms hold a per-client
+	// timestamp — so a login must not affect one.
+	dm, err := db.Route(store.KindDM, "a1a1a1a1a1a1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InsertMessage(store.Message{
+		Direction: "out", Kind: store.KindDM, MeshKey: dm.MeshKey, Body: "hi",
+		ChannelID: dm.ChannelID, MessageID: "msg-2", SentTS: sent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordLogin(dm.MeshKey, "ok"); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.newestSeenByPeer(dm); got.After(sent) {
+		t.Error("a login changed the retry rules for a direct message")
+	}
+}
+
+// A room re-sends a post it never got an acknowledgement for, with a fresh
+// packet timestamp so the mesh's own duplicate check lets it through. Ours is
+// the only layer that can tell it is the same post.
+func TestARepeatedInboundPostIsRelayedOnce(t *testing.T) {
+	b, _ := newTestBridge(t)
+	const key, who, text = "f40e29492972", "Londy-D", "Haha are you sure you fixed it?"
+
+	if b.seenInbound(store.KindRoom, key, who, text) {
+		t.Fatal("the first sighting was treated as a repeat")
+	}
+	if !b.seenInbound(store.KindRoom, key, who, text) {
+		t.Error("the same post arriving again was relayed a second time")
+	}
+
+	// Somebody else saying the same thing is a different message.
+	if b.seenInbound(store.KindRoom, key, "Tina", text) {
+		t.Error("two people saying the same thing collapsed into one")
+	}
+	// So is the same person in a different room.
+	if b.seenInbound(store.KindRoom, "aaaaaaaaaaaa", who, text) {
+		t.Error("the same text in another room was suppressed")
+	}
+	// And once the window has passed, a repeat is somebody typing it again.
+	b.inMu.Lock()
+	for k := range b.inbound {
+		b.inbound[k] = time.Now().Add(-inboundRepeatWindow - time.Second)
+	}
+	b.inMu.Unlock()
+	if b.seenInbound(store.KindRoom, key, who, text) {
+		t.Error("a message repeated long afterwards was suppressed")
+	}
+}
