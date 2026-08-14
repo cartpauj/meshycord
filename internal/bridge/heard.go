@@ -64,12 +64,6 @@ func (w *heardWatch) note(p meshcore.RawPacket) bool {
 	return first
 }
 
-func (w *heardWatch) count() int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return len(w.paths)
-}
-
 // watchForRepeats starts listening for the mesh rebroadcasting a channel
 // message we just sent, and answers the Discord message when it does — or when
 // it is clear that nothing did.
