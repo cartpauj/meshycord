@@ -122,7 +122,7 @@ From `examples/companion_radio/MyMesh.cpp:6`:
 | 4 | `CMD_GET_CONTACTS` | optional (takes a `since` param for incremental sync) |
 | 5 | `CMD_GET_DEVICE_TIME` | |
 | 6 | `CMD_SET_DEVICE_TIME` | |
-| 7 | `CMD_SEND_SELF_ADVERT` | |
+| 7 | `CMD_SEND_SELF_ADVERT` | yes — `advert` / `advert flood`, **see below** |
 | 8 | `CMD_SET_ADVERT_NAME` | |
 | 9 | `CMD_ADD_UPDATE_CONTACT` | |
 | 10 | `CMD_SYNC_NEXT_MESSAGE` | yes — pull a waiting message |
@@ -146,6 +146,31 @@ From `examples/companion_radio/MyMesh.cpp:6`:
 | 28 | `CMD_HAS_CONNECTION` | |
 | 29 | `CMD_LOGOUT` | |
 | 30 | `CMD_GET_CONTACT_BY_KEY` | yes — classify a sender on demand |
+
+### `CMD_SEND_SELF_ADVERT` (0x07): the reach is one optional byte
+
+```c
+if (len >= 2 && cmd_frame[1] == 1) {   // 1 = flood, anything else = zero hop
+  sendFloodScoped(default_scope, pkt, 0);
+} else {
+  sendZeroHop(pkt);
+}
+```
+
+(`companion_radio/MyMesh.cpp:1258`.) Two details worth knowing before wiring this
+to a button:
+
+- Send the BARE command byte for zero hop rather than an explicit `0`. The
+  parameter is guarded by `len >= 2`, so older firmware that predates it is
+  happiest not being sent one at all.
+- **The location is the node's decision, not the caller's.** It reads
+  `advert_loc_policy` and either includes its own coordinates or does not
+  (`MyMesh.cpp:1252`). There is no per-advert override, so a UI must not offer one.
+
+The reply is a plain OK, meaning the packet was queued. Nothing acknowledges an
+advert — it is a broadcast — so there is no outcome to wait for, and the firmware
+imposes no rate limit of its own. A flood advert is relayed by every repeater
+that hears it, which makes restraint entirely the caller's problem.
 
 ### Back up the companion's identity
 

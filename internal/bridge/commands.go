@@ -95,6 +95,17 @@ var meshCommands = []discord.AppCommand{{
 		},
 		{Type: 1, Name: "tidy", Description: "Drop links whose channel or mesh slot is gone"},
 		{
+			Type: 1, Name: "advert", Description: "Announce this node to the mesh",
+			Options: []discord.AppCommandOption{{
+				Type: discord.OptionString, Name: "reach",
+				Description: "How far it goes. Defaults to direct neighbours only.",
+				Choices: []discord.AppCommandChoice{
+					{Name: "direct neighbours only (zero hop)", Value: "zero-hop"},
+					{Name: "the whole mesh (flood — costs everyone airtime)", Value: "flood"},
+				},
+			}},
+		},
+		{
 			Type: 1, Name: "sync-rooms", Description: "Give every known room server a channel",
 			Options: []discord.AppCommandOption{{
 				Type: discord.OptionBoolean, Name: "confirm",
@@ -391,6 +402,14 @@ func (b *Bridge) onSlashCommand(ctx context.Context, i *discord.Interaction) {
 		}
 	case "unlink":
 		line = "remove " + get("target").String()
+	case "advert":
+		// Zero hop by default. A flood is the one that costs everybody else
+		// airtime, so it has to be asked for.
+		if get("reach").String() == "flood" {
+			line = "advert flood"
+		} else {
+			line = "advert"
+		}
 	case "sync-rooms":
 		line = "sync rooms"
 		if get("confirm").Bool() {

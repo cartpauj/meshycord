@@ -314,8 +314,26 @@ since a channel you are already in does not need the ceremony. `link` is `add`,
 /mesh login [target]      set a room-server password in a private popup
 /mesh tidy                drop links whose channel or mesh slot is gone
 /mesh sync-rooms          give every known room server a channel (asks first)
+/mesh advert [reach]      announce this node to the mesh
 /mesh reset               delete everything the bridge created (asks first)
 ```
+
+`advert` is the one thing here that transmits on your behalf without a message to
+send. An advert is how a MeshCore node says "I exist, here is my key and name",
+and it is the only way into anybody else's contact list — nothing else announces
+you. It comes in the same two reaches the phone app offers, and they cost very
+different amounts of other people's airtime:
+
+- **direct neighbours only** (the default) is one transmission. No repeater passes
+  it on, so only radios that hear yours directly pick it up. This is what you want
+  after a rename, or to find out whether a neighbour can hear you at all.
+- **flood** is relayed by every repeater that hears it, which is how you reach
+  somebody on the far side of the mesh — and how you spend a little of everyone's
+  airtime. Typed, that is `advert flood`.
+
+Nothing acknowledges an advert; it is a broadcast. So the reply means "queued for
+transmission" and no marker follows. Whether the advert carries your location is
+the node's own setting, not something the bridge can override per advert.
 
 The radio's own contact list is managed separately, because these change the node
 rather than anything in Discord:
