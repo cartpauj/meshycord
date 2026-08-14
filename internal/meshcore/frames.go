@@ -363,7 +363,33 @@ func DecodeSendResult(f []byte) (SendResult, error) {
 // Only the first 6 key bytes go on the wire, which is why a DM can be
 // addressed to someone who is not in the contact list at all.
 func EncodeSendTxtMsg(prefix []byte, text string, now time.Time) ([]byte, error) {
-	return encodeSendTxtMsg(prefix, text, now, TxtTypePlain)
+	return encodeSendTxtMsg(prefix, text, now, TxtTypePlain, 0)
+}
+
+// EncodeSendTxtMsgRetry re-sends a message the far end may already have.
+//
+// Two fields do the work, and both are load-bearing (BaseChatMesh.cpp:420):
+//
+//   - The TIMESTAMP is the message's identity. A room server compares it to the
+//     last one it accepted from you and, when they match, acknowledges the
+//     message without posting it a second time (`is_retry`,
+//     simple_room_server/MyMesh.cpp:451). Send a fresh timestamp and it is a
+//     brand new message to the room, which is how a retry becomes a duplicate.
+//   - The ATTEMPT number is what stops the retry being thrown away instead. It
+//     is written into the packet, so it changes the packet hash — and MeshCore
+//     deduplicates by packet hash below the app layer, meaning a byte-identical
+//     retry is silently swallowed by the mesh and never reaches anyone. It also
+//     changes the expected-ack hash, so the acknowledgement that comes back is
+//     attributable to this attempt rather than the last one.
+//
+// Together: same timestamp, different attempt. The far end recognises the
+// message, does not duplicate it, and still acknowledges it.
+//
+// Attempts above 3 are fine to pass — the node moves the number to the tail of
+// the payload itself, which costs 2 bytes and is why it refuses an attempt > 3
+// carrying more than MaxMsgLen-2 characters.
+func EncodeSendTxtMsgRetry(prefix []byte, text string, sent time.Time, attempt uint8) ([]byte, error) {
+	return encodeSendTxtMsg(prefix, text, sent, TxtTypePlain, attempt)
 }
 
 // EncodeSendCLICmd builds a CmdSendTxtMsg carrying a remote CLI command.
@@ -385,16 +411,16 @@ func EncodeSendTxtMsg(prefix []byte, text string, now time.Time) ([]byte, error)
 //     downstream ever sees this value — which is why `clock sync` sets the
 //     repeater from the NODE's clock and not from ours. See SetDeviceTime.
 func EncodeSendCLICmd(prefix []byte, text string, now time.Time) ([]byte, error) {
-	return encodeSendTxtMsg(prefix, text, now, TxtTypeCLIData)
+	return encodeSendTxtMsg(prefix, text, now, TxtTypeCLIData, 0)
 }
 
-func encodeSendTxtMsg(prefix []byte, text string, now time.Time, txtType byte) ([]byte, error) {
+func encodeSendTxtMsg(prefix []byte, text string, now time.Time, txtType, attempt byte) ([]byte, error) {
 	if len(prefix) < 6 {
 		return nil, fmt.Errorf("meshcore: need at least 6 key bytes to address a message, got %d", len(prefix))
 	}
 	body := clampToLimit(text)
 	buf := make([]byte, 0, 1+1+1+4+6+len(body))
-	buf = append(buf, CmdSendTxtMsg, txtType, 0 /*attempt*/)
+	buf = append(buf, CmdSendTxtMsg, txtType, attempt)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(now.Unix()))
 	buf = append(buf, prefix[:6]...)
 	buf = append(buf, body...)

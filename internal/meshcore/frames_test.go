@@ -615,3 +615,46 @@ func TestLoginResultIsAdmin(t *testing.T) {
 		})
 	}
 }
+
+// A resend has to look like the SAME message with a DIFFERENT attempt.
+//
+// The timestamp is the message's identity — a room server compares it to the
+// last one it accepted and skips posting a match — while the attempt number
+// changes the packet, so the mesh does not discard the retry as a duplicate
+// packet and the acknowledgement is attributable to this try.
+func TestRetryRepeatsTheTimestampAndRaisesTheAttempt(t *testing.T) {
+	prefix := make([]byte, 6)
+	sent := time.Unix(1786000000, 0)
+
+	first, err := EncodeSendTxtMsgRetry(prefix, "hello", sent, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := EncodeSendTxtMsgRetry(prefix, "hello", sent, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Layout: [cmd][txt_type][attempt][timestamp u32][prefix 6][text]
+	if first[2] != 0 || second[2] != 1 {
+		t.Errorf("attempt byte = %d then %d, want 0 then 1", first[2], second[2])
+	}
+	if !bytes.Equal(first[3:7], second[3:7]) {
+		t.Error("the retry changed the timestamp; the far end will treat it as a new message")
+	}
+	if want := uint32(sent.Unix()); binary.LittleEndian.Uint32(first[3:7]) != want {
+		t.Errorf("timestamp = %d, want %d", binary.LittleEndian.Uint32(first[3:7]), want)
+	}
+	if bytes.Equal(first, second) {
+		t.Error("the retry is byte-identical, so the mesh would drop it as a duplicate packet")
+	}
+
+	// A first send is attempt 0 at the time it is sent.
+	plain, err := EncodeSendTxtMsg(prefix, "hello", sent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(plain, first) {
+		t.Error("a fresh send should be attempt 0")
+	}
+}

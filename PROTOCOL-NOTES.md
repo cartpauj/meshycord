@@ -360,11 +360,43 @@ including the failed ones.
   nearby".** A station hundreds of miles away with a stored route sends
   direct-routed packets. Wording matters in any UI: genuine adjacency is a
   *flooded* packet with zero hops accumulated.
-- **Posting to a room server without a session fails silently** — the send
-  succeeds and the post simply never appears. Refuse up front instead.
-- **The room server's keep-alive interval is not forwarded** to the client, so
-  there is no expiry to schedule against. Re-establish sessions on events:
-  whenever the link returns, and whenever a post finds no session.
+- **Posting to a room server that has never seen you fails silently** — the
+  sender is not in the client table, so `onPeerDataRecv` cannot resolve it and
+  returns without a reply or an ACK. The send itself succeeds. Refuse up front
+  instead; and note the missing ACK is the only evidence, which is what makes it
+  worth acting on.
+- **A room-server login does not expire.** There is no session timer anywhere in
+  the room firmware. `CMD_SEND_LOGIN` writes a permission byte into the room's
+  client table, the table is written to the room's flash as `/s_contacts`
+  (`ClientACL::save`) and reloaded at boot, and posting checks nothing but that
+  byte (`simple_room_server/MyMesh.cpp:481`). The login therefore survives the
+  client restarting, the room restarting, and any amount of silence.
+
+  What ends one is **eviction**: the table holds `MAX_CLIENTS` (20), and a new
+  client logging in displaces the least recently active non-admin
+  (`ClientACL::putClient`). Admins are never evicted. `last_activity` exists to
+  order that eviction and for nothing else.
+
+  So sessions are re-established on eviction, not on a clock. Since a room
+  acknowledges posts from READ_WRITE and better, an unacknowledged room post is
+  the signal that the entry is gone.
+
+- **The keep-alive interval field is dead.** The room sets `reply_data[5] = 0`
+  and comments it `Legacy: was recommended keep-alive interval (secs / 16)`
+  (`simple_room_server/MyMesh.cpp:387`). The companion reads that byte, `× 16`,
+  and only calls `startConnection()` when it is non-zero
+  (`companion_radio/MyMesh.cpp:691`) — so against current room firmware the
+  node's own keep-alive machinery never starts. `REQ_TYPE_KEEP_ALIVE` (0x02)
+  does exist and does refresh `last_activity`, but it must be sent DIRECT and
+  the companion exposes no command to send one, so a client that wants to stay
+  recently-active does it by logging in again.
+
+- **A room silently drops posts whose timestamp goes backwards.** The replay
+  guard is `sender_timestamp >= client->last_timestamp`
+  (`simple_room_server/MyMesh.cpp:449`), and `last_timestamp` is per-client and
+  persisted in behaviour by the room. A node whose clock jumps backwards — a
+  fresh boot with no RTC, say — posts into a room that will discard everything
+  until real time catches up, with no error and no ACK.
 - **There is no per-message route flag.** The node picks flood when a contact
   has no stored path and direct otherwise (`BaseChatMesh.cpp:449`), so forcing
   a flood means clearing the stored path with `CMD_RESET_PATH`. It is relearned

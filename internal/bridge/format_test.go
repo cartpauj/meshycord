@@ -287,6 +287,7 @@ func TestMarkersAreDistinct(t *testing.T) {
 	for name, e := range map[string]string{
 		"ok": EmojiOK, "fail": EmojiFail, "sent": EmojiSent,
 		"retry-trigger": EmojiRetry, "waiting": EmojiWaiting,
+		"split": EmojiSplit,
 	} {
 		if prev, dup := seen[e]; dup {
 			t.Errorf("%s and %s are the same emoji (%s); the display would be ambiguous", name, prev, e)
@@ -368,4 +369,34 @@ func TestRefusalsDoNotPromiseRetries(t *testing.T) {
 		}
 		return true
 	})
+}
+
+// The split marker is a fact about the message, not a verdict on it, so nothing
+// that replaces a verdict may take it off.
+func TestSplitMarkerIsNotAVerdict(t *testing.T) {
+	for _, v := range AllVerdicts {
+		if v == EmojiSplit {
+			t.Fatal("the split marker is listed as a verdict, so a resend would clear it")
+		}
+	}
+}
+
+// Every marker must be a single code point.
+//
+// A variation selector (U+FE0F) has to survive percent-encoding into a reaction
+// URL, and when it does not the reaction simply never appears — no error worth
+// reading, just a marker that silently stopped working. Scissors would have
+// been the obvious choice for a split and is exactly this trap.
+func TestMarkersHaveNoVariationSelectors(t *testing.T) {
+	all := append([]string{EmojiSplit}, AllVerdicts...)
+	for _, e := range all {
+		for _, r := range e {
+			if r == 0xFE0F || r == 0xFE0E {
+				t.Errorf("marker %q carries a variation selector", e)
+			}
+		}
+		if n := len([]rune(e)); n != 1 {
+			t.Errorf("marker %q is %d code points; markers should be one", e, n)
+		}
+	}
 }

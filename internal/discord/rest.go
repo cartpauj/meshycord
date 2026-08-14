@@ -190,6 +190,29 @@ func (r *rateLimiter) get(key string) *bucket {
 // per channel and per guild.
 func bucketKey(method, path string) string {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+
+	// Reactions are one bucket per channel, covering every emoji, every
+	// message, and both PUT and DELETE. Discord enforces this far more tightly
+	// than the ordinary message limit — roughly one request every 250ms — and
+	// keying them any other way is not a small inefficiency:
+	//
+	// The emoji sits in the path and is not numeric, so it survived the
+	// normalisation below and minted a NEW bucket for every emoji. A fresh
+	// bucket is "unknown", an unknown bucket never waits, so each one fired
+	// immediately, got a 429, and slept off the server's retry_after — a full
+	// second, every single time. Three reactions per message (hourglass on,
+	// hourglass off, verdict on) meant about three seconds of self-inflicted
+	// delay on top of the mesh round trip, which is what made a two-second
+	// delivery feel like it was hanging.
+	//
+	// Collapsed like this the limiter reads the headers off the first call and
+	// paces the rest, so the 429 stops happening at all.
+	for i, p := range parts {
+		if p == "reactions" && i >= 1 {
+			return "REACTIONS /" + strings.Join(parts[:2], "/") + "/reactions"
+		}
+	}
+
 	for i, p := range parts {
 		// Interaction and webhook tokens are unique per use, so leaving them in
 		// the key mints a new bucket every time and grows the map without

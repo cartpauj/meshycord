@@ -313,10 +313,12 @@ func (b *Bridge) ensureCLIAdmin(ctx context.Context, t CLITarget) error {
 
 // cliAdmin reports whether there is an admin session recent enough to trust.
 //
-// The far node decides when a session really ends and never says so, exactly
-// as with room servers, so trust expires on a timer. Being wrong here is
-// invisible — the command is simply discarded — which makes a stale session
-// far more expensive than the round trip of logging in again.
+// It shares the room-server window, and an admin session is if anything the
+// more durable of the two: the far node's client table is saved to its flash
+// like a room's, and eviction — the one thing that ends a session — explicitly
+// skips admins (`ClientACL::putClient`). So this is a re-check interval. Being
+// wrong is invisible, since a command sent without a session is discarded
+// without an error, which is why there is a window at all rather than none.
 func (b *Bridge) cliAdmin(prefix string) bool {
 	ttl := b.cfg.RoomSessionTTL()
 	if ttl == 0 {

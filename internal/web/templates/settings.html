@@ -100,20 +100,33 @@
 
   <label for="max_chunks">Maximum transmissions per message</label>
   <input type="number" id="max_chunks" name="max_chunks" value="{{.Cfg.MaxChunks}}" min="1" max="10">
-  <small>A mesh message is 133 bytes; longer text is split. Anything needing more transmissions than
-    this is refused rather than truncated — truncating looked like it sent, which was worse.
-    At {{.Cfg.MaxChunks}} that is about {{.ChunkCapacity}} characters of plain text.</small>
+  <small>A mesh message is 160 bytes; longer text is split into numbered transmissions. Anything
+    needing more than this is refused rather than truncated, because a truncated message looks
+    identical to one that sent. At {{.Cfg.MaxChunks}} that is about {{.ChunkCapacity}} characters
+    of plain text.</small>
 
   <label for="chunk_gap">Pause between transmissions (ms)</label>
   <input type="number" id="chunk_gap" name="chunk_gap" value="{{.ChunkGapMS}}" min="0" max="30000">
-  <small>Airtime is shared with everybody else on the mesh.</small>
+  <small>Applies to mesh channels only. Airtime is shared with everybody else on the mesh, and a
+    group message cannot be acknowledged, so a pause is the only pacing available there. Direct
+    messages and room posts pace themselves: each transmission waits for the previous one to be
+    acknowledged before the next goes out.</small>
 
   <label for="room_session">Trust a room-server login for (seconds)</label>
-  <input type="number" id="room_session" name="room_session" value="{{.RoomSessionSeconds}}" min="0" max="3600">
-  <small>Room servers silently discard posts from anyone whose session has lapsed, and never say
-    how long a session lasts — so the bridge logs in again once this window passes.
-    <strong>0 logs in before every message</strong>: the most reliable setting, and it costs a full
-    round trip over the air per post, which roughly doubles the airtime a room conversation uses.</small>
+  <input type="number" id="room_session" name="room_session" value="{{.RoomSessionSeconds}}" min="0" max="604800">
+  <small>A room-server login does not expire: the room writes your permission into its client
+    table and saves it to flash, so it survives reboots at both ends. What can end it is
+    <em>eviction</em> — the table holds 20 clients, and a new login displaces the least recently
+    active one. So this is how long to go without re-checking, not a session lifetime.
+    <strong>0 logs in before every message</strong>, which costs a full round trip over the air per
+    post to re-prove something the room already has written down.</small>
+
+  <label for="room_keepalive">Refresh room logins every (seconds)</label>
+  <input type="number" id="room_keepalive" name="room_keepalive" value="{{.RoomKeepAliveSeconds}}" min="0" max="604800">
+  <small>A background job that logs in to each room server again on this interval, quietly. It
+    keeps the bridge recently-active so a busy room evicts somebody else first, and it restores a
+    session that was evicted before anyone types into it. <strong>0 turns it off</strong> and logins
+    happen only when a message needs one.</small>
 
   <label for="retention">Keep message history for (days)</label>
   <input type="number" id="retention" name="retention" value="{{.RetentionDays}}" min="0" max="3650">

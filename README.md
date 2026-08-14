@@ -245,13 +245,22 @@ marker saying what happened:
 | ✅ | the recipient's node acknowledged it |
 | 📡 | transmitted — no acknowledgement is possible |
 | ❌ | rejected, or no acknowledgement before the deadline |
-| 🔄 | *you* add this to your own failed message to ask for a resend, which also clears the stored route so the retry floods |
+| 🧩 | too long for one transmission, so it was sent as several — see [Long messages](#long-messages) |
+| 🔄 | *you* add this to your own failed message to ask for a resend |
 
-⏳ does not hang around indefinitely. The node estimates how long the round trip
-should take, and the bridge waits that long, floored at a minute and capped at
-two. The floor is there because a four-second estimate would turn a perfectly
-good delivery into a ❌; the ceiling is there because a lost acknowledgement
-should not leave a message pending forever.
+🧩 is the only one that stays. It records what happened to the message rather
+than how it ended, so a verdict never removes it.
+
+⏳ does not hang around. The node returns an estimate with every send, computed
+from the packet's airtime and the route it chose — 16× airtime for a flood,
+which is the firmware's own allowance for the whole mesh relaying it — and the
+bridge waits twice that. In practice a confirmation arrives in two to four
+seconds and a failure is reported in about fifteen.
+
+If a confirmation turns up after the bridge gave up, the ❌ becomes a ✅. That is
+not a nicety: the node's send timeout does not clear its expected-ack entry, so
+a late acknowledgement genuinely does arrive, and a message that landed should
+not keep a cross that invites you to send it again.
 
 The difference between ✅ and 📡 is not decoration: **MeshCore cannot
 acknowledge group messages at all.** A channel send can only ever be reported as
@@ -264,9 +273,10 @@ with the acknowledgement deliberately withheld, which is indistinguishable from
 a delivery failure. The bridge reads the ACL byte from the login and says so
 outright rather than letting you wonder.
 
-The bridge also logs in again whenever the session is older than the window in
-Settings (five minutes by default; 0 logs in before every message, which costs
-a round trip per post).
+A room login does not expire, so the bridge does not re-prove one every few
+minutes. It re-checks on the window in Settings (six hours by default), and a
+background job refreshes each room's login every four hours so a post never
+waits behind one. Both are adjustable, and 0 in either turns that half off.
 
 ### Commands
 
@@ -333,8 +343,21 @@ means the row you saw — contacts adverting in afterwards cannot shift it.
 ### Resending
 
 Add the 🔄 reaction **to the message you want resent** — your own message, the
-one carrying the ❌ — and it goes out again. Reacting to one numbered `[2/3]`
-piece of a split message resends exactly that piece.
+one carrying the ❌ — and it goes out again. For a split message that means the
+original, the one marked 🧩; the numbered pieces cannot be resent on their own,
+and asking will tell you so.
+
+**A resend is not a second message.** It repeats the timestamp the first attempt
+went out with and raises the attempt number, which is exactly what the protocol
+was built for: the far end identifies a message by its timestamp, so a room
+server recognises the retry, acknowledges it, and does not post it twice, while
+the changed attempt number keeps the packet distinct enough that the mesh does
+not discard it as a duplicate of the first try. Sending with a fresh timestamp
+instead is what would put the same text in the room twice.
+
+Anything that already landed is not sent again at all. A resend of a split
+message puts only the missing pieces back on the air; the ones already
+acknowledged keep their ✅ and cost no airtime.
 
 The reaction is consumed as soon as it registers, so it vanishes and is
 replaced by ⏳ while the bridge works. That is deliberate: it means a second
@@ -362,10 +385,8 @@ Three things follow from that, and they are the cases worth knowing:
 Often the route will already have been cleared before you press anything. A
 direct message sent along a stored path that gets no acknowledgement has that
 path cleared automatically when the deadline passes, on the same reasoning — the
-path is the prime suspect. The bridge does not resend on its own, though: the
-message may well have arrived with only the acknowledgement lost, and an
-automatic retry would post it twice. Clearing costs nothing and cannot duplicate
-anything; sending again is your call.
+path is the prime suspect. The bridge does not resend on its own; that is your
+call, and 🔄 is how you make it.
 
 The reaction is the only way to ask for a resend. A linked channel intercepts
 only the `path:` prefixes and `!promote`; everything else you type goes out over
@@ -422,24 +443,53 @@ the route you already have.
 A mesh message is **160 bytes** (`MAX_TEXT_LEN` in the firmware). On a group
 channel the node prepends its own name and silently truncates to fit, so the
 usable text there is `160 - len(node_name) - 2` and the bridge splits against
-that smaller budget. Longer text is split into up to three transmissions, about
-two seconds apart — both numbers are in Settings — each echoed into Discord as its
-own message and tracked separately, so you can see how much airtime you used and
-which pieces actually landed.
+that smaller budget. Longer text becomes up to three transmissions — the limit
+is in Settings — each echoed into Discord as its own numbered message and
+tracked separately, so you can see how much airtime you used and which pieces
+landed. The original gets 🧩 and waits.
 
 Beyond that limit it is **refused, not truncated**, and the refusal says how much
 would have to go. Truncating silently looks identical to a successful send.
 
+**The pieces go one at a time, each waiting for the last to be acknowledged.**
+They are one message torn up, so their order is the message. If a piece is not
+acknowledged, the ones after it are never transmitted — they are marked ❌
+immediately and you are told which piece stopped it. A message with a hole in
+the middle cannot be read at the far end, and sending the rest would spend
+airtime making that worse rather than better. Resend the original when you want
+to try again; it picks up only what is missing.
+
+The original's own marker follows its pieces: ✅ only if every piece was
+acknowledged, ❌ if any failed. A single missing transmission makes the whole
+message wrong at the far end, so the original says so.
+
+Mesh channels are the exception, and it is the protocol's doing rather than a
+choice: group messages cannot be acknowledged at all, so there is no outcome to
+wait for. Those pieces go out spaced by the courtesy gap in Settings, each
+marked 📡.
+
 ### Room servers
 
-A room server refuses posts from anyone not logged in, and it does so
+A room server discards posts from anyone it has never seen, and it does so
 **silently** — the send succeeds and the post simply never appears. MeshyCord
 refuses up front instead, and offers a button. Press it, type the password into
 the popup, and it never enters channel history at all.
 
-The password is kept so the session can be re-established after a reconnect,
-which happens automatically: the companion protocol does not forward the
-server's keep-alive interval, so there is no expiry to schedule against.
+The password is kept so the session can be re-established without asking again.
+
+**A room login does not expire.** Logging in writes a permission byte into the
+room's client table, the room saves that table to its own flash, and posting
+checks nothing else — so the login survives the radio disconnecting, MeshyCord
+restarting, and the room itself rebooting. What ends one is *eviction*: the
+table holds 20 clients, and a new login displaces the least recently active
+non-admin.
+
+So the bridge does not log in on a timer. It keeps each room's login warm in the
+background every few hours, which also keeps it out of the eviction queue, and
+it treats an unacknowledged room post as the signal that the entry is gone —
+the next post logs in first. None of that is announced in Discord. A failed
+login only interrupts you when a message was actually waiting on it, or when
+the room says the password is wrong.
 
 ---
 
@@ -457,7 +507,7 @@ server's keep-alive interval, so there is no expiry to schedule against.
   channel exist" has an answer months later
 - **Settings** — the bot token and server, the console account, the transport and
   its device, BLE name/address/PIN, the auto-create policy, history retention,
-  the room-session window, and the split limits
+  the room-session window and keep-alive, and the split limits
 
 `/healthz` answers `ok` without a login, for an uptime check or a monitoring
 probe. It reports that the process is serving, not that either link is up — the
@@ -557,6 +607,13 @@ them.
 The bridge could not take your reaction off the message, so Discord considers it
 already present and sends no event for the second press. Give the bot **Manage
 Messages**, or remove the 🔄 by hand before adding it again.
+
+**"Everything I sent went ❌ right after a restart."**
+An acknowledgement handle only means something to the node that issued it and
+to the process that recorded it, so anything in flight when the bridge stopped
+can never be resolved either way. Those are marked failed on the way back up
+rather than left on ⏳ forever. They may well have arrived; what is certain is
+that nobody can say so now. Resend the ones that mattered.
 
 **"My node is on the mesh but I cannot message it."**
 It has to be in the radio's contact list. If its adverts do not reach you, add
@@ -666,6 +723,10 @@ they are the shape of what a bridge like this can and cannot do:
   path, not all of them.
 - **Discord mentions do not translate.** A Discord account is not a mesh node, so
   there is nothing sensible to turn one into. Use MeshCore's `@[Node Name]`.
+- **A missing acknowledgement is not proof of anything.** It means the message
+  did not arrive, or it arrived and the acknowledgement was lost — and no part
+  of the protocol can tell those apart. Every ❌ is a deadline expiring, which is
+  why one can still turn into a ✅ afterwards.
 
 ---
 

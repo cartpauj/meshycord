@@ -38,6 +38,10 @@ type Bridge struct {
 	// pending holds outbound DMs waiting for a delivery confirmation.
 	pendMu  sync.Mutex
 	pending map[uint32]*pendingSend
+	// failed holds sends whose deadline passed, briefly. The node can still
+	// push an ack for one — its send timeout does not clear the expected-ack
+	// entry — and a message that actually landed should not keep a cross.
+	failed map[uint32]*pendingSend
 
 	// rooms holds room-server session state.
 	roomMu sync.Mutex
@@ -92,10 +96,13 @@ type Bridge struct {
 	seenMu sync.Mutex
 	seen   map[string]struct{}
 
-	ready       atomic.Bool
-	botUserID   atomic.Value // string
-	startedAt   time.Time
-	lastInbound atomic.Int64
+	ready atomic.Bool
+	// announcedOnline keeps "Bridge online" to once per run, rather than once
+	// per Gateway reconnect.
+	announcedOnline atomic.Bool
+	botUserID       atomic.Value // string
+	startedAt       time.Time
+	lastInbound     atomic.Int64
 }
 
 // gatewayEvent is one thing that happened in Discord, queued for the worker.
@@ -116,6 +123,7 @@ func New(cfg *config.Store, db *store.Store, log *slog.Logger) *Bridge {
 		log:              log,
 		cats:             map[string]string{},
 		pending:          map[uint32]*pendingSend{},
+		failed:           map[uint32]*pendingSend{},
 		rooms:            map[string]*roomSession{},
 		cliWaiters:       map[string]*cliPending{},
 		cliLogins:        map[string]chan meshcore.LoginResult{},
@@ -284,7 +292,16 @@ func (b *Bridge) setup(ctx context.Context) {
 		return
 	}
 	b.ready.Store(true)
-	b.adminSay(ctx, "Bridge online. `help` for commands, or use `/mesh`.")
+	b.resolveStrandedSends(ctx)
+
+	// Once per run, not once per Gateway READY. A reconnect is routine — a
+	// network blip, a Discord-side restart — and announcing each one turns the
+	// admin channel into a connectivity log for something that fixed itself.
+	// The web console and `status` both show the link, which is where you look
+	// when you actually want to know.
+	if !b.announcedOnline.Swap(true) {
+		b.adminSay(ctx, "Bridge online. `help` for commands, or use `/mesh`.")
+	}
 
 	// Channel names are only known once the node is reachable, so if the mesh
 	// link came up first, catch up on the auto-linking now.
@@ -346,15 +363,24 @@ func (b *Bridge) onMeshConnect(ctx context.Context, sess *meshcore.Session) erro
 
 func (b *Bridge) onMeshDisconnect() {
 	b.db.LogEvent("warn", "mesh", "link to the node went down")
-	// Room sessions do not survive the link, so forget them rather than
-	// letting a stale "logged in" flag make posts vanish silently.
+
+	// Room sessions are deliberately NOT forgotten here. A room login is a
+	// permission byte in the room's own client table, written to the room's
+	// flash — our USB cable coming loose has nothing to do with it, and
+	// discarding the knowledge only bought a burst of logins on reconnect.
+	// Anything mid-attempt is abandoned, since its answer was coming back over
+	// a link that no longer exists.
 	b.roomMu.Lock()
 	for _, s := range b.rooms {
-		s.loggedIn = false
+		s.loginInFlight = false
 	}
 	b.roomMu.Unlock()
-	// Admin sessions for remote CLI go the same way, and for the same reason:
-	// a stale one means commands are discarded in silence.
+
+	// Remote-CLI admin sessions are dropped, though the far node's ACL outlives
+	// the link just as a room's does. They are not worth the same care: nothing
+	// records them across a restart, they are used interactively a few times a
+	// week, and the cost of being wrong is a command discarded in silence
+	// against the cost of one extra login round trip.
 	b.forgetCLIAdmins()
 }
 
@@ -722,6 +748,10 @@ func (b *Bridge) housekeeping(ctx context.Context) {
 	defer expire.Stop()
 	contacts := time.NewTicker(15 * time.Minute)
 	defer contacts.Stop()
+	// Room keep-alive. Checked every minute, acted on only when a room is
+	// actually due — the interval itself is hours, and lives in settings.
+	rooms := time.NewTicker(time.Minute)
+	defer rooms.Stop()
 
 	for {
 		select {
@@ -730,6 +760,8 @@ func (b *Bridge) housekeeping(ctx context.Context) {
 		case <-expire.C:
 			b.expirePending(ctx)
 			b.expireRoomLogins(ctx)
+		case <-rooms.C:
+			b.refreshRoomSessions(ctx)
 		case <-contacts.C:
 			if sess := b.link.Session(); sess != nil {
 				if _, complete, err := sess.RefreshContacts(ctx); err == nil {

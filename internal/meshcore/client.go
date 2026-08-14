@@ -524,11 +524,20 @@ func (s *Session) NextMessage(ctx context.Context) (Message, bool, error) {
 // The returned SendResult carries the expected-ack handle: a later
 // PushSendConfirmed with that handle is what actually proves delivery.
 func (s *Session) SendDM(ctx context.Context, prefixHex, text string) (SendResult, error) {
+	return s.SendDMAttempt(ctx, prefixHex, text, time.Now(), 0)
+}
+
+// SendDMAttempt sends with an explicit timestamp and attempt number, which is
+// how a message is RE-sent without the far end treating it as a new one. See
+// EncodeSendTxtMsgRetry for why both fields matter.
+func (s *Session) SendDMAttempt(ctx context.Context, prefixHex, text string,
+	sent time.Time, attempt uint8) (SendResult, error) {
+
 	prefix, err := ParsePrefix(prefixHex)
 	if err != nil {
 		return SendResult{}, err
 	}
-	payload, err := EncodeSendTxtMsg(prefix, text, time.Now())
+	payload, err := EncodeSendTxtMsgRetry(prefix, text, sent, attempt)
 	if err != nil {
 		return SendResult{}, err
 	}

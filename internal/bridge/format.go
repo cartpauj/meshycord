@@ -27,10 +27,25 @@ const (
 	// has not acknowledged it yet. Distinct from a verdict: it says the mesh
 	// is still working on it.
 	EmojiWaiting = "⏳"
+	// EmojiSplit marks a message that did not fit in one transmission and was
+	// sent as several. It is a fact about the message, not a verdict on it: it
+	// goes on once, at the moment of splitting, and is never taken off — not by
+	// a verdict, not by a resend. The numbered pieces posted underneath are
+	// what the marker is pointing at.
+	//
+	// A puzzle piece, and a single code point (U+1F9E9) like every marker
+	// above. Scissors would read better and are a trap: ✂️ is U+2702 followed
+	// by a variation selector, which has to survive being percent-encoded into
+	// a reaction URL, and an emoji that fails there fails silently.
+	EmojiSplit = "🧩"
 )
 
 // AllVerdicts is every marker the bridge applies, so a resend can clear the
 // previous one before adding a new verdict.
+//
+// EmojiSplit is deliberately absent. It records what happened to the message
+// rather than how it ended, so clearing it on a resend would erase something
+// still true — and a resend of a long message splits it again anyway.
 var AllVerdicts = []string{EmojiOK, EmojiFail, EmojiSent, EmojiRetry, EmojiWaiting}
 
 // FormatInbound renders a mesh message for Discord.

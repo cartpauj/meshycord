@@ -137,7 +137,17 @@ CREATE TABLE IF NOT EXISTS messages (
   delivery      TEXT    NOT NULL DEFAULT '',
   round_trip_ms INTEGER NOT NULL DEFAULT 0,
   chunk_index   INTEGER NOT NULL DEFAULT 0,
-  chunk_total   INTEGER NOT NULL DEFAULT 0
+  chunk_total   INTEGER NOT NULL DEFAULT 0,
+  -- The Discord message a split was made from, on each of its pieces. Without
+  -- it a resend has no way to find the pieces it posted last time, and posts a
+  -- fresh set beside them.
+  parent_message_id TEXT NOT NULL DEFAULT '',
+  -- The exact timestamp and attempt number put on the wire. A resend has to
+  -- reuse the timestamp, or the far end treats it as a new message and posts it
+  -- twice, and has to raise the attempt, or the mesh discards it as a duplicate
+  -- packet. See meshcore.EncodeSendTxtMsgRetry.
+  sent_ts       INTEGER NOT NULL DEFAULT 0,
+  attempt       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS messages_time  ON messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS messages_route ON messages(kind, mesh_key, created_at DESC);
@@ -171,6 +181,19 @@ CREATE INDEX IF NOT EXISTS events_time ON events(created_at DESC);
 func (s *Store) migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
+	}
+	// Columns added after the first release. CREATE TABLE IF NOT EXISTS does
+	// nothing to a table that already exists, so each one needs its own ALTER,
+	// and re-running it on an up-to-date database is expected rather than
+	// exceptional — hence the swallowed duplicate-column error.
+	for _, alter := range []string{
+		`ALTER TABLE messages ADD COLUMN parent_message_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE messages ADD COLUMN sent_ts INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE messages ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := s.db.Exec(alter); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate: %s: %w", alter, err)
+		}
 	}
 	return nil
 }
@@ -582,6 +605,24 @@ func (s *Store) RecordLogin(prefix, result string) error {
 	return err
 }
 
+// LastLogin returns when a room last answered a login and what it said.
+//
+// Worth persisting because a room login is not held by our node: it is a
+// permission byte in the ROOM's client table, saved to the room's flash. It
+// therefore survives the bridge restarting, and this is how the bridge
+// remembers that across a restart instead of logging in again to be told
+// something it already knew.
+func (s *Store) LastLogin(prefix string) (time.Time, string) {
+	var at int64
+	var result string
+	err := s.db.QueryRow(`SELECT last_login, last_result FROM rooms WHERE prefix = ?`,
+		prefix).Scan(&at, &result)
+	if err != nil || at == 0 {
+		return time.Time{}, ""
+	}
+	return time.Unix(at, 0), result
+}
+
 // RoomsWithPasswords lists every room the bridge can log in to unattended.
 func (s *Store) RoomsWithPasswords() ([]string, error) {
 	rows, err := s.db.Query(`SELECT prefix FROM rooms WHERE password != ''`)
@@ -643,6 +684,14 @@ type Message struct {
 	RoundTrip  time.Duration
 	ChunkIndex int
 	ChunkTotal int
+	// ParentMsgID is the Discord message this transmission was split from, set
+	// only on the pieces. It is what lets a resend reuse the pieces it posted
+	// last time instead of posting a second set beside them.
+	ParentMsgID string
+	// SentTS and Attempt are exactly what went on the wire, so a resend can
+	// repeat the timestamp and raise the attempt.
+	SentTS  time.Time
+	Attempt uint8
 }
 
 const messageCols = `id, created_at, direction, kind, mesh_key, peer_label, author, body,
@@ -657,16 +706,125 @@ func (s *Store) InsertMessage(m Message) (int64, error) {
 	res, err := s.db.Exec(`INSERT INTO messages
 		(created_at, direction, kind, mesh_key, peer_label, author, body,
 		 discord_channel_id, discord_message_id, discord_user, have_hops, hops, path_raw,
-		 have_snr, snr, flooded, ack, delivery, round_trip_ms, chunk_index, chunk_total)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		 have_snr, snr, flooded, ack, delivery, round_trip_ms, chunk_index, chunk_total,
+		 parent_message_id, sent_ts, attempt)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.CreatedAt.Unix(), m.Direction, string(m.Kind), m.MeshKey, m.PeerLabel, m.Author, m.Body,
 		m.ChannelID, m.MessageID, m.DiscordUsr, boolInt(m.HaveHops), m.Hops, m.PathRaw,
 		boolInt(m.HaveSNR), m.SNR, boolInt(m.Flooded), m.Ack, m.Delivery,
-		m.RoundTrip.Milliseconds(), m.ChunkIndex, m.ChunkTotal)
+		m.RoundTrip.Milliseconds(), m.ChunkIndex, m.ChunkTotal, m.ParentMsgID,
+		unixOrZero(m.SentTS), m.Attempt)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// ChunkEcho is one piece of a split message, as it was posted into Discord.
+type ChunkEcho struct {
+	MessageID string
+	Body      string
+	Index     int
+	// SentTS and Attempt are what this piece went out as last time.
+	SentTS  time.Time
+	Attempt uint8
+	// Delivery is how that attempt ended, so a resend can leave the pieces that
+	// already landed alone instead of sending them a second time.
+	Delivery string
+}
+
+// ChunkEchoes returns the Discord messages posted for the pieces of a split,
+// in order, from the most recent time that message was sent.
+//
+// A resend uses this to put the markers back on the pieces already on screen
+// rather than posting a duplicate set underneath them. Only the latest attempt
+// is returned: MAX(id) with a bare GROUP BY is SQLite's documented way of
+// picking the whole row that the aggregate came from.
+func (s *Store) ChunkEchoes(parentMessageID string) ([]ChunkEcho, error) {
+	if parentMessageID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+		SELECT discord_message_id, body, chunk_index, delivery, sent_ts, attempt, MAX(id)
+		FROM messages
+		WHERE parent_message_id = ? AND direction = 'out' AND discord_message_id != ''
+		GROUP BY chunk_index
+		ORDER BY chunk_index`, parentMessageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChunkEcho
+	for rows.Next() {
+		var c ChunkEcho
+		var ignored int64
+		var ts int64
+		if err := rows.Scan(&c.MessageID, &c.Body, &c.Index, &c.Delivery, &ts, &c.Attempt,
+			&ignored); err != nil {
+			return nil, err
+		}
+		if ts != 0 {
+			c.SentTS = time.Unix(ts, 0)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// unixOrZero keeps a zero time as a zero column rather than a 1970 timestamp.
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+// LastSend returns the most recent transmission recorded for a Discord message,
+// so a resend can repeat its timestamp and raise its attempt number.
+func (s *Store) LastSend(messageID string) (Message, bool) {
+	if messageID == "" {
+		return Message{}, false
+	}
+	var m Message
+	var ts int64
+	err := s.db.QueryRow(`
+		SELECT id, body, sent_ts, attempt, delivery FROM messages
+		WHERE discord_message_id = ? AND direction = 'out'
+		ORDER BY id DESC LIMIT 1`, messageID).
+		Scan(&m.ID, &m.Body, &ts, &m.Attempt, &m.Delivery)
+	if err != nil || ts == 0 {
+		return Message{}, false
+	}
+	m.SentTS = time.Unix(ts, 0)
+	return m, true
+}
+
+// StrandedSends lists outbound messages left waiting for an acknowledgement
+// that nothing is waiting on any more, which after a restart is all of them.
+//
+// The pending table lives in memory: an acknowledgement handle is only
+// meaningful to the node that issued it, and the node forgets too. So a message
+// in flight when the process stopped can never be resolved, and without this it
+// keeps its hourglass forever.
+func (s *Store) StrandedSends() ([]Message, error) {
+	rows, err := s.db.Query(`
+		SELECT id, discord_channel_id, discord_message_id, chunk_index, parent_message_id
+		FROM messages
+		WHERE direction = 'out' AND delivery = ? AND discord_message_id != ''`,
+		DeliveryPending)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.MessageID, &m.ChunkIndex, &m.ParentMsgID); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // SetDiscordMessageID attaches the Discord message a mesh message was relayed

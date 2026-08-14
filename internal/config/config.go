@@ -45,6 +45,7 @@ const (
 	KeyChunkGapMS   = "policy.chunk_gap_ms"
 	KeyRetentionDay = "policy.retention_days"
 	KeyRoomTTL      = "policy.room_session_seconds"
+	KeyRoomKeepAliv = "policy.room_keepalive_seconds"
 
 	KeyWebUser       = "web.username"
 	KeyWebPassHash   = "web.password_hash"
@@ -73,17 +74,38 @@ const (
 	// DefaultRetentionDays bounds history growth on an SD card. Zero keeps
 	// everything.
 	DefaultRetentionDays = 90
-	// DefaultRoomSessionSeconds is how long a room-server login is assumed to
-	// remain good.
+	// DefaultRoomSessionSeconds is how long a room-server login is trusted.
 	//
-	// The protocol never tells us the room's real keep-alive interval, so this
-	// is a guess. It matters because nothing can detect a stale session: room
-	// servers do not acknowledge posts, so a post into a lapsed session is
-	// discarded in complete silence.
+	// Six hours, and the reason it is not five minutes is worth writing down:
+	// a room-server login does not expire. There is no session timer in the
+	// firmware at all. Logging in writes a permission byte into the room's
+	// client table, that table is saved to the room's flash
+	// (`ClientACL::save`, `/s_contacts`) and reloaded at boot, and posting
+	// checks nothing but that byte. `last_activity` exists only to order
+	// least-recently-used eviction.
 	//
-	// Five minutes is a compromise, not a measurement. Set it to 0 to log in
-	// before every message, which is the only way to be certain.
-	DefaultRoomSessionSeconds = 300
+	// So the login survives our restart, the room's restart, and any amount of
+	// silence. What can still take it away:
+	//
+	//   - eviction. The table holds MAX_CLIENTS (20) and a 21st client logging
+	//     in displaces the least recently active non-admin.
+	//   - an operator clearing the room's ACL, or reflashing it.
+	//
+	// Neither is time-based, which is why re-logging in every few minutes only
+	// ever bought airtime. A long window plus the checks below is both cheaper
+	// and more accurate.
+	DefaultRoomSessionSeconds = 21600
+	// DefaultRoomKeepAliveSeconds is how often a background job logs in to each
+	// room server again.
+	//
+	// Not to stop a session expiring — nothing expires. It does two useful
+	// things. It keeps our entry recently-active, so a busy room evicts
+	// somebody else first, and it re-establishes a session that WAS evicted
+	// without waiting for somebody to type into a dead one.
+	//
+	// Four hours: comfortably inside the trust window above, and about six
+	// small packets per room per day.
+	DefaultRoomKeepAliveSeconds = 14400
 )
 
 // Store is the typed settings accessor.
@@ -297,10 +319,11 @@ func (c *Store) SetRetentionDays(v int) error { return c.db.SetInt(KeyRetentionD
 // logs in again.
 //
 // Zero means log in before every single message. That is the simplest thing to
-// reason about and the most reliable, and it costs a full over-the-air round
-// trip per post — on a shared medium where every hop repeats the packet, that
-// roughly doubles the airtime a room conversation uses. A short non-zero
-// window gets almost all of the reliability for a fraction of the cost.
+// reason about, and it costs a full over-the-air round trip per post — on a
+// shared medium where every hop repeats the packet, that roughly doubles the
+// airtime a room conversation uses, to re-prove something the room has written
+// to its flash. See DefaultRoomSessionSeconds: logins do not expire, so this is
+// a re-check interval rather than a lifetime.
 func (c *Store) RoomSessionTTL() time.Duration {
 	n := c.db.GetInt(KeyRoomTTL, DefaultRoomSessionSeconds)
 	if n < 0 {
@@ -312,6 +335,52 @@ func (c *Store) RoomSessionTTL() time.Duration {
 // SetRoomSessionSeconds sets the room-session freshness window. Zero means log
 // in before every message.
 func (c *Store) SetRoomSessionSeconds(v int) error { return c.db.SetInt(KeyRoomTTL, v) }
+
+// RoomKeepAlive is how often to log in to each room server again in the
+// background. Zero disables it, and logins then happen only when a message
+// needs one.
+//
+// Getting the interval wrong is cheap in both directions. Too short only spends
+// airtime; too long is caught by the post itself, because a room DOES
+// acknowledge posts from anything with READ_WRITE or better — so a post into a
+// session that was evicted goes unacknowledged, and that drops the session and
+// logs in again.
+func (c *Store) RoomKeepAlive() time.Duration {
+	n := c.db.GetInt(KeyRoomKeepAliv, DefaultRoomKeepAliveSeconds)
+	if n < 0 {
+		n = 0
+	}
+	return time.Duration(n) * time.Second
+}
+
+// SetRoomKeepAliveSeconds sets the background refresh interval. Zero turns the
+// keep-alive off.
+func (c *Store) SetRoomKeepAliveSeconds(v int) error { return c.db.SetInt(KeyRoomKeepAliv, v) }
+
+// RoomTrustWindow is how long a room login is believed without re-checking.
+//
+// Without a keep-alive this is just RoomSessionTTL, kept short because a
+// session nobody is maintaining is a session that may already be gone. With one
+// running, the session is being actively refreshed, so trusting it for the
+// refresh interval — plus a quarter, to cover a late or lost refresh — is what
+// makes the keep-alive worth having: posts go straight out instead of waiting
+// behind a login every few minutes.
+//
+// A TTL of zero still means zero. That setting says "log in before every single
+// message", which is a deliberate choice for certainty, and a background job is
+// not entitled to overrule it.
+func (c *Store) RoomTrustWindow() time.Duration {
+	ttl := c.RoomSessionTTL()
+	if ttl == 0 {
+		return 0
+	}
+	if ka := c.RoomKeepAlive(); ka > 0 {
+		if w := ka + ka/4; w > ttl {
+			return w
+		}
+	}
+	return ttl
+}
 
 // --- Web UI login ----------------------------------------------------------
 

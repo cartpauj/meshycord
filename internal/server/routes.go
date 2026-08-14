@@ -42,23 +42,24 @@ type page struct {
 	// template function — those bind once at parse time.
 	CSRF template.HTML
 
-	Cfg                *config.Store
-	Messages           []store.Message
-	Events             []store.Event
-	Routes             []store.Route
-	Candidates         []linkCandidate
-	Contacts           []store.Contact
-	Channels           []meshcore.ChannelInfo
-	SerialPorts        []string
-	Filter             string
-	Show               string
-	TypeStr            string
-	Query              messageQuery
-	NextBefore         int64
-	ChunkCapacity      int
-	ChunkGapMS         int
-	RetentionDays      int
-	RoomSessionSeconds int
+	Cfg                  *config.Store
+	Messages             []store.Message
+	Events               []store.Event
+	Routes               []store.Route
+	Candidates           []linkCandidate
+	Contacts             []store.Contact
+	Channels             []meshcore.ChannelInfo
+	SerialPorts          []string
+	Filter               string
+	Show                 string
+	TypeStr              string
+	Query                messageQuery
+	NextBefore           int64
+	ChunkCapacity        int
+	ChunkGapMS           int
+	RetentionDays        int
+	RoomSessionSeconds   int
+	RoomKeepAliveSeconds int
 }
 
 type messageQuery struct {
@@ -492,6 +493,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	p.ChunkGapMS = int(s.cfg.ChunkGap() / time.Millisecond)
 	p.RetentionDays = int(s.cfg.Retention() / (24 * time.Hour))
 	p.RoomSessionSeconds = int(s.cfg.RoomSessionTTL() / time.Second)
+	p.RoomKeepAliveSeconds = int(s.cfg.RoomKeepAlive() / time.Second)
 	s.render(w, "settings.html", p)
 }
 
@@ -557,6 +559,9 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if n, err := strconv.Atoi(r.FormValue("room_session")); err == nil && n >= 0 {
 		_ = s.cfg.SetRoomSessionSeconds(n)
+	}
+	if n, err := strconv.Atoi(r.FormValue("room_keepalive")); err == nil && n >= 0 {
+		_ = s.cfg.SetRoomKeepAliveSeconds(n)
 	}
 
 	if v := strings.TrimSpace(r.FormValue("username")); v != "" && v != s.cfg.Username() {
