@@ -43,6 +43,7 @@ const (
 	KeyAutoDMs      = "policy.autocreate_dms"
 	KeyMaxChunks    = "policy.max_chunks"
 	KeyChunkGapMS   = "policy.chunk_gap_ms"
+	KeyHeardMS      = "policy.heard_window_ms"
 	KeyRetentionDay = "policy.retention_days"
 	KeyRoomTTL      = "policy.room_session_seconds"
 	KeyRoomKeepAliv = "policy.room_keepalive_seconds"
@@ -71,6 +72,25 @@ const (
 	DefaultMaxChunks = 3
 	// DefaultChunkGapMS spaces transmissions out as a courtesy to the mesh.
 	DefaultChunkGapMS = 2000
+	// DefaultHeardMS is how long a channel message listens for the mesh to
+	// rebroadcast it before concluding that nothing did.
+	//
+	// The number comes from the firmware, not from taste. A repeater waits a
+	// random 0 to 5 x (tx_delay_factor x airtime) before passing a flood on
+	// (simple_repeater/MyMesh.cpp:547), and tx_delay_factor defaults to 0.5
+	// (:892) — so up to 2.5 airtimes of jitter, plus the airtime of the
+	// rebroadcast itself. For a full-length message that is a few seconds for
+	// the first hop and about as long again for the second. Eight seconds
+	// covers two hops comfortably.
+	//
+	// The companion's own delay is gentler (0.2, MyMesh.cpp:273), which is why
+	// the repeater's figure is the one that sets this.
+	//
+	// Erring long is nearly free: the message wears the hourglass in the
+	// meantime, which is accurate, and the tick goes on the instant the first
+	// repeat arrives rather than when this expires. Erring short would report
+	// "nobody heard it" about a message that was in fact being passed along.
+	DefaultHeardMS = 8000
 	// DefaultRetentionDays bounds history growth on an SD card. Zero keeps
 	// everything.
 	DefaultRetentionDays = 90
@@ -302,6 +322,26 @@ func (c *Store) ChunkGap() time.Duration {
 
 // SetChunkGapMS sets the inter-transmission pause.
 func (c *Store) SetChunkGapMS(v int) error { return c.db.SetInt(KeyChunkGapMS, v) }
+
+// HeardWindow is how long a channel message waits to hear itself rebroadcast
+// before it is reported as transmitted-but-unheard.
+//
+// Clamped at both ends. Below a second no repeat could possibly arrive, so
+// every channel message would be reported unheard; above a minute the marker
+// arrives long after anybody is still looking at the message.
+func (c *Store) HeardWindow() time.Duration {
+	ms := c.db.GetInt(KeyHeardMS, DefaultHeardMS)
+	if ms < 1000 {
+		ms = 1000
+	}
+	if ms > 60000 {
+		ms = 60000
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// SetHeardWindowMS sets the repeat-listening window.
+func (c *Store) SetHeardWindowMS(v int) error { return c.db.SetInt(KeyHeardMS, v) }
 
 // Retention is how long message history is kept. Zero means forever.
 func (c *Store) Retention() time.Duration {

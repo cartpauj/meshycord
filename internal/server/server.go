@@ -532,6 +532,8 @@ func deliveryLabel(state string) string {
 		return "failed"
 	case store.DeliveryTransmitted:
 		return "transmitted"
+	case store.DeliveryHeard:
+		return "repeated by the mesh"
 	case store.DeliveryPending:
 		return "awaiting ack"
 	case store.DeliveryRefused:
@@ -542,7 +544,7 @@ func deliveryLabel(state string) string {
 
 func deliveryClass(state string) string {
 	switch state {
-	case store.DeliveryDelivered:
+	case store.DeliveryDelivered, store.DeliveryHeard:
 		return "badge up"
 	case store.DeliveryFailed, store.DeliveryRefused:
 		return "badge down"

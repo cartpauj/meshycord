@@ -11,21 +11,29 @@ import (
 
 // Delivery markers.
 //
-// The distinction between a tick and a satellite is not decoration. MeshCore
-// cannot acknowledge group messages at all, so a channel send can only ever be
-// reported as transmitted — putting a tick there would claim a delivery the
-// protocol is incapable of proving.
+// The distinction between a tick and a satellite is not decoration, and what
+// separates them differs by route.
+//
+// For a direct message or a room post it is an acknowledgement: the far node
+// says it has the message, or it does not.
+//
+// For a channel there is no acknowledgement to be had — MeshCore cannot
+// acknowledge group traffic at all — so the tick means something weaker and
+// still worth having: the radio HEARD a repeater pass the message on. The
+// satellite is what is left when it did not. Both are honest; neither claims a
+// delivery the protocol cannot prove. See heard.go.
 const (
-	EmojiOK   = "✅" // acknowledged by the recipient's node
+	EmojiOK   = "✅" // acknowledged by the recipient's node, or heard being repeated
 	EmojiFail = "❌" // rejected, or no acknowledgement before the deadline
-	EmojiSent = "📡" // transmitted; no acknowledgement is possible
+	EmojiSent = "📡" // transmitted, and nothing was heard of it afterwards
 	// EmojiRetry is what YOU add to ask for a resend. The bridge never displays
 	// it — echoing the request back reads as though it is still unhandled — and
 	// consumes it on receipt so a second press registers.
 	EmojiRetry = "🔄"
-	// EmojiWaiting means the message is on the air and the recipient's node
-	// has not acknowledged it yet. Distinct from a verdict: it says the mesh
-	// is still working on it.
+	// EmojiWaiting means the message is on the air and no answer has come back
+	// yet — an acknowledgement for a direct message or room post, a repeat for
+	// a channel message. Distinct from a verdict: it says the mesh is still
+	// working on it.
 	EmojiWaiting = "⏳"
 	// EmojiSplit marks a message that did not fit in one transmission and was
 	// sent as several. It is a fact about the message, not a verdict on it: it

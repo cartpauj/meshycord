@@ -112,6 +112,16 @@
     messages and room posts pace themselves: each transmission waits for the previous one to be
     acknowledged before the next goes out.</small>
 
+  <label for="heard_window">Listen for a channel message to be repeated (ms)</label>
+  <input type="number" id="heard_window" name="heard_window" value="{{.HeardWindowMS}}" min="1000" max="60000">
+  <small>A group message cannot be acknowledged, so the only evidence it went anywhere is hearing a
+    repeater pass it on. During this window the message shows ⏳; the moment a repeat is heard it
+    becomes ✅, and if the window closes in silence it becomes 📡 — transmitted, but nobody in
+    earshot was heard relaying it. A repeater waits a random delay of up to about 2.5× the message's
+    airtime before rebroadcasting, and a second hop takes as long again, so eight seconds covers two
+    hops comfortably. Waiting longer costs nothing but the hourglass; too short reports messages as
+    unheard while they are still spreading.</small>
+
   <label for="room_session">Trust a room-server login for (seconds)</label>
   <input type="number" id="room_session" name="room_session" value="{{.RoomSessionSeconds}}" min="0" max="604800">
   <small>A room-server login does not expire: the room writes your permission into its client

@@ -53,10 +53,10 @@ const (
 // Without it the original message was marked "transmitted" the moment the radio
 // accepted the last piece, and never looked at again — so a message whose
 // every transmission then went unacknowledged sat there wearing a satellite,
-// above its own pieces wearing crosses. The satellite is honest only where an
-// acknowledgement is impossible, which is channels; for a DM or a room the
-// pieces are each acknowledged, so the whole is answerable and the original
-// should say what actually happened to it.
+// above its own pieces wearing crosses. Every route has an answerable outcome
+// per piece — an acknowledgement for a DM or a room, a heard repeat for a
+// channel — so the original should say what actually happened to it rather than
+// only that it was handed to the radio.
 type chunkGroup struct {
 	channelID string
 	messageID string
@@ -528,10 +528,12 @@ func (b *Bridge) sendToMesh(ctx context.Context, sess *meshcore.Session, req sen
 	}
 
 	// The original message waits for its pieces rather than claiming anything
-	// now. Channels are the exception: nothing there is ever acknowledged, so
-	// there is nothing to wait for and the satellite is the whole truth.
+	// now — including on a channel, where the pieces cannot be acknowledged but
+	// can still be heard coming back off a repeater. A channel parent ends up
+	// ticked only if every piece was heard, and wears the satellite if any of
+	// them went out unheard.
 	var group *chunkGroup
-	if req.hasUI() && !isChannel {
+	if req.hasUI() {
 		group = &chunkGroup{
 			channelID: req.UIChannel, messageID: req.UIMessage, total: len(chunks),
 		}
@@ -613,13 +615,9 @@ func (b *Bridge) sendToMesh(ctx context.Context, sess *meshcore.Session, req sen
 		}
 	}
 
-	// Every piece went out and, where it could be, was acknowledged. A channel
-	// gets the satellite here because nothing there is ever acknowledged;
-	// anywhere else the group has already answered the original as its last
-	// piece settled.
-	if req.hasUI() && group == nil {
-		b.reactVerdict(ctx, req.UIChannel, req.UIMessage, EmojiSent)
-	}
+	// Nothing to do here any more: every piece belongs to a group, and the
+	// group answers the original as its last piece settles — on a channel that
+	// is the last repeat window closing, elsewhere the last acknowledgement.
 }
 
 // previousChunks finds the messages posted for this message's pieces last time,
@@ -736,7 +734,7 @@ func (b *Bridge) transmitChunk(ctx context.Context, sess *meshcore.Session, req 
 
 	isChannel := req.Route.Kind == store.KindChannel
 	if isChannel {
-		err := sess.SendChannel(ctx, mustSlot(req.Route.MeshKey), wire)
+		send, err := sess.SendChannelTracked(ctx, mustSlot(req.Route.MeshKey), wire)
 		if err != nil {
 			b.log.Warn("channel send rejected", "slot", req.Route.MeshKey, "err", err)
 			rec.Delivery = store.DeliveryFailed
@@ -746,14 +744,25 @@ func (b *Bridge) transmitChunk(ctx context.Context, sess *meshcore.Session, req 
 			}
 			return false, nil
 		}
-		// MeshCore cannot acknowledge group messages, so the honest marker is
-		// "transmitted", never a tick.
+		rec.SentTS = send.Timestamp
+		// Transmitted for now. MeshCore cannot acknowledge a group message, so
+		// there is no receipt coming — but the radio can still hear a repeater
+		// pass it on, and that upgrades this. See heard.go.
 		rec.Delivery = store.DeliveryTransmitted
-		_, _ = b.db.InsertMessage(rec)
-		if uiMessage != "" {
-			b.reactVerdict(ctx, uiChannel, uiMessage, EmojiSent)
-		}
+		rowID, _ := b.db.InsertMessage(rec)
 		b.log.Info("discord -> mesh", "kind", "channel", "slot", req.Route.MeshKey, "bytes", len(wire))
+		if uiMessage != "" {
+			// No marker goes on here. The message already wears the hourglass —
+			// every route puts it there before the radio is touched — and that
+			// is exactly right for now: on the air, and the mesh has not yet
+			// said whether it picked the message up. watchForRepeats replaces
+			// it with a verdict either way.
+			b.watchForRepeats(ctx, send, req.Route.MeshKey, uiChannel, uiMessage, rowID, group)
+		} else {
+			// No Discord message to mark, so nothing is listening — but a
+			// group a split belongs to still has to be accounted for.
+			b.settleChunk(ctx, group, false, false)
+		}
 		return true, nil
 	}
 
