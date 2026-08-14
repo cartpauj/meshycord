@@ -135,6 +135,29 @@ if [ "$(id -u)" -ne 0 ]; then
 	die 'this needs root: pipe it into `sudo sh`, or run `sudo sh install.sh`'
 fi
 
+# --- fresh install, or an upgrade? ------------------------------------------
+#
+# Decided HERE, before anything is installed, and from the DATABASE rather than
+# from the package version — because the only thing this answer is used for is
+# whether to print the default console credentials, and the database is what
+# carries the password. Printing "admin / admin" at somebody upgrading reads as
+# though their password was just reset.
+#
+# The database path comes from the running unit when there is one, since -db is
+# a flag somebody may have changed, and falls back to the packaged default.
+db_path=''
+if command -v systemctl >/dev/null 2>&1; then
+	db_path="$(systemctl show -p ExecStart --value meshycord 2>/dev/null |
+		sed -n 's/.*-db[= ]*\([^ ]*\).*/\1/p' | head -n 1)"
+fi
+if [ -z "$db_path" ]; then
+	db_path='/var/lib/meshycord/db.sqlite'
+fi
+had_db=0
+if [ -f "$db_path" ]; then
+	had_db=1
+fi
+
 # --- download and verify ----------------------------------------------------
 
 tmp="$(mktemp -d)"
@@ -164,16 +187,19 @@ fi
 case "$METHOD" in
 deb)
 	say '  installing with dpkg'
-	dpkg -i "${tmp}/${asset}" || {
+	# The package's own banner is suppressed: the report at the end of this
+	# script says the same things with the real address and port, and hearing it
+	# twice is what made a one-command install feel like a wall of text.
+	MESHYCORD_QUIET=1 dpkg -i "${tmp}/${asset}" || {
 		warn '  dpkg reported missing dependencies; asking apt to resolve them'
-		apt-get -y -f install
+		MESHYCORD_QUIET=1 apt-get -y -f install
 	}
 	;;
 rpm)
 	say '  installing with rpm'
 	# -U upgrades or installs. --replacepkgs lets a reinstall of the same
 	# version succeed, which is what re-running this script does.
-	rpm -Uvh --replacepkgs "${tmp}/${asset}"
+	MESHYCORD_QUIET=1 rpm -Uvh --replacepkgs "${tmp}/${asset}"
 	;;
 tar)
 	say '  installing from the tarball'
@@ -225,9 +251,17 @@ if command -v systemctl >/dev/null 2>&1 &&
 	port="$(systemctl show -p ExecStart --value meshycord 2>/dev/null |
 		sed -n 's/.*-listen[= ]*[^ ]*:\([0-9]\{1,5\}\).*/\1/p' | head -n 1)"
 	say "Console  : http://$(hostname -I 2>/dev/null | awk '{print $1}'):${port:-9150}"
-	say "Sign in  : admin / admin  <- change this first, it is the same on every install"
-	say ''
-	say 'Then set the Discord bot token and your server id on the Settings page.'
+	if [ "$had_db" -eq 1 ]; then
+		# An upgrade. The password lives in the database, which dpkg and rpm both
+		# treat as package configuration, so it is untouched — and asserting a
+		# password we cannot read would be a guess either way. The console
+		# already warns on every page while the default is still in place, which
+		# is the right place for that reminder.
+		say 'Sign in  : unchanged — settings, links and history came through the upgrade'
+	else
+		say 'Sign in  : admin / admin  <- change this first, it is the same on every install'
+	fi
+	say "Help     : https://github.com/${REPO}"
 else
 	say ''
 	say 'The service is not running yet. Check: journalctl -u meshycord -n 30'

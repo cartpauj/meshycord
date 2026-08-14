@@ -13,51 +13,48 @@ if [ -f "$STATE_DIR/db.sqlite" ]; then
     chmod 0600 "$STATE_DIR/db.sqlite" 2>/dev/null || true
 fi
 
+# Fresh install, or an upgrade?
+#
+# From the DATABASE, not from whether the service is running. That was the old
+# test and it was wrong every time: prerm stops the service before this script
+# runs, so an upgrade always looked like a first install and was greeted with
+# "username: admin / password: admin" — which reads as though the password had
+# just been reset.
+#
+# dpkg and rpm both pass an argument saying which case this is, but they say it
+# differently, and this script is shared. The database is the same answer in
+# both packagers and it is the thing the banner is actually about.
+fresh=1
+if [ -f "$STATE_DIR/db.sqlite" ]; then
+    fresh=0
+fi
+
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
 
-    if systemctl is-active --quiet meshycord.service 2>/dev/null; then
-        # An upgrade. Restart so the new binary takes over; settings live in
-        # the database, so nothing is lost.
-        echo "Restarting meshycord..."
-        systemctl restart meshycord.service >/dev/null 2>&1 || true
-    else
-        systemctl enable meshycord.service >/dev/null 2>&1 || true
+    # Unconditional, both of them. prerm DISABLED the unit on its way past — it
+    # cannot tell an upgrade from a removal either — so enabling here is what
+    # keeps an upgraded install starting at boot.
+    systemctl enable meshycord.service >/dev/null 2>&1 || true
+    systemctl restart meshycord.service >/dev/null 2>&1 ||
         systemctl start meshycord.service >/dev/null 2>&1 || true
 
+    # install.sh prints its own report, with the real address and port read from
+    # the unit rather than a placeholder, so it sets this to avoid saying it all
+    # twice. Anyone installing the package directly gets the banner.
+    if [ "$fresh" -eq 1 ] && [ "${MESHYCORD_QUIET:-0}" != 1 ]; then
         cat <<'BANNER'
 
-  MeshyCord is installed and running.
-
-  Finish setup in the web console:
+  MeshyCord is installed and running. Finish setup in the web console:
 
       http://<this-machine>:9150
+      username: admin    password: admin    <- change this first
 
-      username: admin
-      password: admin
+  It is the same password on every install and it is published in the README, so
+  until you change it anyone who can reach this machine can read your message
+  history and your Discord bot token. The console says so on every page.
 
-  CHANGE THAT PASSWORD. It is the same on every install and it is printed in
-  the README, so until you change it anyone who can reach this machine can
-  read your message history and your Discord bot token. The console says so
-  on every page until you do. Settings page, or from the shell:
-
-      sudo meshycord -db /var/lib/meshycord/db.sqlite -set-password 'something long'
-
-  You will also need a Discord bot token and your server (guild) ID.
-
-  Plug the MeshCore node in over USB and it is found automatically. To see
-  which serial devices are visible:
-
-      meshycord -list-ports
-
-  To administer a repeater over the air, from this shell:
-
-      sudo meshycord-cli -list
-      sudo meshycord-cli -login <repeater> <admin-password>
-      sudo meshycord-cli -c "clock" <repeater>
-
-  Logs:    journalctl -u meshycord -f
-  Status:  systemctl status meshycord
+  Help: https://github.com/cartpauj/meshycord
 
 BANNER
     fi
