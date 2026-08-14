@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"meshycord/internal/config"
+	"meshycord/internal/discord"
 	"meshycord/internal/meshcore"
 	"meshycord/internal/store"
 )
@@ -572,5 +573,58 @@ func TestHelpDoesNotAdvertiseTheDisabledReplyRetry(t *testing.T) {
 	}
 	if !strings.Contains(help, EmojiRetry) {
 		t.Error("help does not mention the reaction that does work")
+	}
+}
+
+// An advert is how this node gets into anybody else's contact list, and the two
+// reaches cost very different amounts of other people's airtime. Both words have
+// to be understood, and neither may be mistaken for the other.
+func TestAdvertCommandDistinguishesReach(t *testing.T) {
+	b, _ := newTestBridge(t)
+
+	// No link, so what is checked here is that the command is recognised at all
+	// and refuses honestly rather than falling through to "unknown command".
+	for _, line := range []string{"advert", "ADVERT", "advert flood", "advert zero-hop"} {
+		got := exec(t, b, line)
+		if strings.Contains(got, "Unknown command") {
+			t.Errorf("%q was not recognised as a command", line)
+		}
+		if !strings.Contains(got, "Not connected") {
+			t.Errorf("%q with no link said: %q", line, got)
+		}
+	}
+
+	// And it is in the help, or nobody will find it.
+	if help := exec(t, b, "help"); !strings.Contains(help, "advert") {
+		t.Error("help does not mention advert")
+	}
+}
+
+// The slash command must carry both reaches, and must default to the cheap one:
+// a flood is passed on by every repeater, so it is not something to do by
+// accident.
+func TestAdvertSlashCommandDefaultsToZeroHop(t *testing.T) {
+	var advert *discord.AppCommandOption
+	for i, o := range meshCommands[0].Options {
+		if o.Name == "advert" {
+			advert = &meshCommands[0].Options[i]
+		}
+	}
+	if advert == nil {
+		t.Fatal("/mesh has no advert subcommand")
+	}
+	if len(advert.Options) != 1 || advert.Options[0].Name != "reach" {
+		t.Fatalf("advert takes %d options, want one named reach", len(advert.Options))
+	}
+	if advert.Options[0].Required {
+		t.Error("reach is required, so the cheap default cannot apply")
+	}
+	var values []string
+	for _, c := range advert.Options[0].Choices {
+		v, _ := c.Value.(string)
+		values = append(values, v)
+	}
+	if len(values) != 2 || values[0] != "zero-hop" || values[1] != "flood" {
+		t.Errorf("reach choices = %v, want zero-hop then flood", values)
 	}
 }

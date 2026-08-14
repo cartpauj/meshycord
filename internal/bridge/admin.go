@@ -112,6 +112,10 @@ func (b *Bridge) Exec(ctx context.Context, actor, line, channelID, messageID str
 		return b.cmdSyncRooms(ctx, true)
 	case lower == "rediscover":
 		return b.Rediscover(ctx)
+	case lower == "advert" || lower == "advert zero-hop" || lower == "advert zerohop":
+		return b.cmdAdvert(ctx, false)
+	case lower == "advert flood":
+		return b.cmdAdvert(ctx, true)
 	}
 
 	if rest, ok := cutPrefix(raw, "contact "); ok {
@@ -159,7 +163,6 @@ func (b *Bridge) cmdHelp() string {
 		"find <text>\n" +
 		"   modifiers: unlinked, recent, name, hops, desc\n" +
 		"   e.g. list rooms unlinked hops\n" +
-		"        find ridge name\n" +
 		"add <n>              link item n from the last listing\n" +
 		"add <keyprefix>      link by 12-char key, even if not a contact\n" +
 		"add <n> as <name>    choose the Discord channel name\n" +
@@ -180,17 +183,19 @@ func (b *Bridge) cmdHelp() string {
 		"login <n|keyprefix> <password>    log in to a room server\n" +
 		"login <n|keyprefix>               forget its stored password\n" +
 		"\n" +
+		"advert [flood]       announce this node; flood = every repeater relays it\n" +
+		"\n" +
 		"status\n" +
 		"sync rooms           link every known room server (asks first)\n" +
 		"reset                delete everything the bridge created\n" +
 		"help\n" +
 		"```\n" +
 		"**Prefer `/mesh login`** — a private popup, so the password never enters channel " +
-		"history. Typing `login` here works too; that message is deleted as soon as it is read.\n" +
+		"history. Typing `login` here works too; that message is deleted on sight.\n" +
 		"_In a linked channel: `path:flood <text>` clears the stored route first; react " +
-		EmojiRetry + " **on the failed message itself** to send it again — that clears the " +
-		"stored route too, so the retry floods instead of repeating down a route that just " +
-		"failed; `!promote <keyprefix>` gives a sender their own channel._\n" +
+		EmojiRetry + " **on the failed message itself** to resend — that floods too, rather " +
+		"than repeating down the route that just failed; `!promote <keyprefix>` gives a sender " +
+		"their own channel._\n" +
 		"_Listings freeze numbering for 10 minutes, so `add 7` always means the 7 you saw. " +
 		"Routing is by key, so renaming a Discord channel never breaks anything._"
 }
@@ -678,6 +683,59 @@ func (b *Bridge) cmdTidy(ctx context.Context) string {
 	}
 	b.db.LogEvent("info", "admin", msg)
 	return msg
+}
+
+// cmdAdvert puts this node's own advert on the air, the same two ways the phone
+// app offers.
+//
+// This is the node the bridge is plugged into announcing itself — its key, its
+// name, and whatever location policy it has set. It is not a way to advertise
+// anything else on the mesh, and there is nothing to advertise on somebody
+// else's behalf.
+//
+// The two modes are genuinely different in cost, which is why they are separate
+// words rather than a flag with a default:
+//
+//   - zero hop reaches only nodes whose radio hears this one directly. It costs
+//     one transmission and bothers nobody. This is what you want after a rename,
+//     or to check whether a neighbour can hear you at all.
+//   - a flood is passed on by every repeater that hears it. That is how you get
+//     into the contact list of somebody on the far side of the mesh, and it
+//     spends a little of everybody's airtime to do it.
+//
+// Neither is acknowledged: an advert is a broadcast, so the reply from the node
+// means "queued for transmission" and there is no delivery to report. Saying
+// that plainly beats a tick that would be guessing.
+func (b *Bridge) cmdAdvert(ctx context.Context, flood bool) string {
+	sess := b.link.Session()
+	if sess == nil {
+		return "Not connected to the node right now."
+	}
+	if err := sess.SendSelfAdvert(ctx, flood); err != nil {
+		return "The node would not send an advert: " + err.Error()
+	}
+
+	name := sess.SelfInfo().Name
+	if name == "" {
+		name = "this node"
+	}
+	kind := "zero-hop"
+	if flood {
+		kind = "flooded"
+	}
+	b.log.Info("sent a self advert", "flood", flood, "node", name)
+	b.db.LogEvent("info", "admin", "sent a "+kind+" self advert")
+
+	if flood {
+		return "**Flooded advert sent** for **" + name + "**.\n" +
+			"Every repeater that hears it passes it on, so this reaches the whole mesh — and " +
+			"spends a little of everybody's airtime doing it. Nothing acknowledges an advert, so " +
+			"there is no delivery to report: watch other people's contact lists, not this channel."
+	}
+	return "**Zero-hop advert sent** for **" + name + "**.\n" +
+		"Only nodes whose radio hears this one directly will have picked it up — repeaters do not " +
+		"pass it on. Use `advert flood` to reach the whole mesh. Nothing acknowledges an advert, so " +
+		"there is no delivery to report."
 }
 
 // cmdSyncRooms links every known room server.

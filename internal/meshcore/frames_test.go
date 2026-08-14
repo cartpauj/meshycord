@@ -658,3 +658,18 @@ func TestRetryRepeatsTheTimestampAndRaisesTheAttempt(t *testing.T) {
 		t.Error("a fresh send should be attempt 0")
 	}
 }
+
+// The advert's reach is one optional byte, and the two forms are not
+// interchangeable: 1 means flood, and the firmware treats anything else — or a
+// missing byte — as zero hop. Older firmware expects the bare command, so a
+// zero-hop advert must not send an explicit 0.
+func TestEncodeSendSelfAdvert(t *testing.T) {
+	zero := EncodeSendSelfAdvert(false)
+	if len(zero) != 1 || zero[0] != CmdSendSelfAdvert {
+		t.Errorf("zero-hop advert = % x, want just the command byte", zero)
+	}
+	flood := EncodeSendSelfAdvert(true)
+	if len(flood) != 2 || flood[0] != CmdSendSelfAdvert || flood[1] != 1 {
+		t.Errorf("flood advert = % x, want [%02X 01]", flood, CmdSendSelfAdvert)
+	}
+}

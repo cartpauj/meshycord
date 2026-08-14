@@ -973,6 +973,25 @@ func (s *Session) ResetPath(ctx context.Context, prefixHex string) error {
 	return nil
 }
 
+// SendSelfAdvert puts this node's own advert on the air.
+//
+// An advert is how a MeshCore node says "I exist, here is my key and name". It
+// is what puts us in other people's contact lists, and it is the only way to
+// get there — nothing else announces us.
+//
+// Zero hop reaches only nodes whose radios hear this one directly. A flood is
+// passed on by every repeater, which is what reaches the whole mesh and what
+// costs everybody else airtime; the node imposes no rate limit of its own, so
+// restraint is entirely the caller's business.
+//
+// The reply is a plain OK and means only that the packet was queued for
+// transmission. Nothing acknowledges an advert, so there is no further outcome
+// to wait for.
+func (s *Session) SendSelfAdvert(ctx context.Context, flood bool) error {
+	_, err := s.expect(ctx, EncodeSendSelfAdvert(flood), RespOK, DefaultCommandTimeout)
+	return err
+}
+
 // ---------------------------------------------------------------------------
 // Room servers
 // ---------------------------------------------------------------------------

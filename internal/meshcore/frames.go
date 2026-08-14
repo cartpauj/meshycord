@@ -671,6 +671,26 @@ func EncodeAppStart(appName string) []byte {
 // EncodeDeviceQuery builds CmdDeviceQuery.
 func EncodeDeviceQuery() []byte { return []byte{CmdDeviceQuery} }
 
+// EncodeSendSelfAdvert builds CmdSendSelfAdvert: tell the mesh who we are.
+//
+//	[0x07]        zero hop — only nodes that hear this radio directly
+//	[0x07][0x01]  flood — every repeater passes it on
+//
+// The second byte is optional and anything other than 1 means zero hop
+// (`companion_radio/MyMesh.cpp:1258`). Omitting it entirely is what the older
+// firmware expects, so a zero-hop advert is sent as the bare byte rather than
+// as an explicit 0.
+//
+// Whether the advert carries a location is the NODE's decision, not ours: it
+// reads advert_loc_policy and includes its own coordinates or does not
+// (`MyMesh.cpp:1252`). There is no way to override that per advert.
+func EncodeSendSelfAdvert(flood bool) []byte {
+	if flood {
+		return []byte{CmdSendSelfAdvert, 1}
+	}
+	return []byte{CmdSendSelfAdvert}
+}
+
 // EncodeSetDeviceTime builds CmdSetDeviceTime. A node with no RTC boots at the
 // epoch, which makes every message timestamp useless until something sets it.
 //
