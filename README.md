@@ -9,6 +9,8 @@ channels; replies typed in Discord go back out over the radio.
                                       Linux box)
 ```
 
+![Mesh traffic in Discord: channels, room servers and companion DMs in the sidebar, each mesh message posted with its sender and hop count](docs/screenshot.png)
+
 One static binary. No runtime to install, no virtualenv, no npm, no separate
 daemon. It owns the radio link, the Discord Gateway, the routing, the message
 history and its own web console.
