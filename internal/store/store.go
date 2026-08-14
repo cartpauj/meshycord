@@ -647,15 +647,17 @@ func (s *Store) RoomsWithPasswords() ([]string, error) {
 
 // Delivery states an outbound message passes through.
 //
-// The distinction between Transmitted and Delivered is not cosmetic: MeshCore
-// cannot acknowledge group messages at all, so a channel send can only ever be
-// reported as transmitted. Showing a tick there would claim a delivery the
-// protocol is incapable of proving.
+// The distinction between Transmitted, Heard and Delivered is not cosmetic.
+// MeshCore cannot acknowledge group messages at all, so a channel send is never
+// Delivered: the strongest thing it can be is Heard, meaning the radio heard a
+// repeater pass the message on. Showing a confirmed delivery there would claim
+// something the protocol is incapable of proving.
 const (
 	DeliveryPending     = "pending"     // sent, waiting for an ack
 	DeliveryDelivered   = "delivered"   // the node confirmed it
 	DeliveryFailed      = "failed"      // rejected, or no ack before the deadline
-	DeliveryTransmitted = "transmitted" // it went out; no ack is possible
+	DeliveryTransmitted = "transmitted" // it went out; nothing was heard of it
+	DeliveryHeard       = "heard"       // a repeater was heard passing it on
 	DeliveryRefused     = "refused"     // never sent, and why is in the body
 	DeliveryReceived    = "received"    // inbound
 )

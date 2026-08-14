@@ -43,6 +43,12 @@ type Bridge struct {
 	// entry — and a message that actually landed should not keep a cross.
 	failed map[uint32]*pendingSend
 
+	// heard holds channel messages listening for the mesh to rebroadcast them,
+	// which is the only delivery evidence a group message can ever have. See
+	// heard.go. Short-lived and few, so a slice beats a map.
+	heardMu sync.Mutex
+	heard   []*heardWatch
+
 	// rooms holds room-server session state.
 	roomMu sync.Mutex
 	rooms  map[string]*roomSession
@@ -519,6 +525,10 @@ func (b *Bridge) meshLoop(ctx context.Context) {
 		b.drainMesh(ctx, sess)
 		go b.loginAllRooms(ctx, sess)
 		go b.syncAfterMesh(ctx)
+		// Deliberately not part of the select below: the raw-packet push is a
+		// firehose and must not compete with messages or delivery
+		// confirmations. See watchRawPackets.
+		go b.watchRawPackets(ctx, sess)
 
 		for sess == b.link.Session() {
 			select {

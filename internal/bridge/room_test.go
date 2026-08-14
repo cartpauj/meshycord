@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,20 +14,44 @@ import (
 	"meshycord/internal/store"
 )
 
+// restLog collects the Discord requests a test provoked, in order.
+//
+// Guarded, because not every verdict is applied on the goroutine that asked for
+// it — a channel message waiting to hear itself repeated is answered from a
+// timer — and an unsynchronised slice here made those tests race rather than
+// fail honestly.
+type restLog struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (l *restLog) add(call string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls = append(l.calls, call)
+}
+
+// all returns a snapshot, safe to read while requests are still arriving.
+func (l *restLog) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.calls...)
+}
+
 // recordREST points the bridge's Discord client at a test server and collects
 // every request path, in order.
-func recordREST(t *testing.T, b *Bridge) *[]string {
+func recordREST(t *testing.T, b *Bridge) *restLog {
 	t.Helper()
-	var calls []string
+	log := &restLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls = append(calls, r.Method+" "+r.URL.Path)
+		log.add(r.Method + " " + r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"1"}`))
 	}))
 	t.Cleanup(srv.Close)
 	b.rest.BaseURL = srv.URL
 	b.rest.Token = func() string { return "test-token" }
-	return &calls
+	return log
 }
 
 func seedRoom(t *testing.T, b *Bridge, db *store.Store) store.Route {
@@ -55,13 +80,13 @@ func TestLapsedRoomSessionHoldsWithoutACross(t *testing.T) {
 		ID: "msg-1", ChannelID: route.ChannelID, Content: "hello room",
 	})
 
-	for _, c := range *calls {
+	for _, c := range calls.all() {
 		if strings.Contains(c, EmojiFail) {
-			t.Fatalf("held post was marked failed: %v", *calls)
+			t.Fatalf("held post was marked failed: %v", calls.all())
 		}
 	}
-	if !anyContains(*calls, EmojiWaiting) {
-		t.Fatalf("held post got no in-progress marker: %v", *calls)
+	if !anyContains(calls.all(), EmojiWaiting) {
+		t.Fatalf("held post got no in-progress marker: %v", calls.all())
 	}
 
 	// And it is actually being held, so the login sweep can pick it up.
@@ -87,8 +112,8 @@ func TestRoomWithNoPasswordFailsAndOffersTheButton(t *testing.T) {
 		ID: "msg-1", ChannelID: route.ChannelID, Content: "hello room",
 	})
 
-	if !anyContains(*calls, EmojiFail) {
-		t.Fatalf("a post with no password should be marked failed: %v", *calls)
+	if !anyContains(calls.all(), EmojiFail) {
+		t.Fatalf("a post with no password should be marked failed: %v", calls.all())
 	}
 }
 
@@ -243,15 +268,15 @@ func TestALateAckClearsTheCross(t *testing.T) {
 	b.pendMu.Unlock()
 
 	b.expirePending(ctx)
-	if !anyContains(*calls, EmojiFail) {
-		t.Fatalf("an expired send was not crossed: %v", *calls)
+	if !anyContains(calls.all(), EmojiFail) {
+		t.Fatalf("an expired send was not crossed: %v", calls.all())
 	}
 
 	// ...and the ack turns up anyway.
 	b.handleConfirmation(ctx, meshcore.Confirmation{Ack: 4242, RoundTrip: 9 * time.Second})
 
 	var removedCross, addedTick bool
-	for _, c := range *calls {
+	for _, c := range calls.all() {
 		if strings.HasPrefix(c, "DELETE") && strings.Contains(c, EmojiFail) {
 			removedCross = true
 		}
@@ -261,7 +286,7 @@ func TestALateAckClearsTheCross(t *testing.T) {
 	}
 	if !removedCross || !addedTick {
 		t.Errorf("a late ack did not correct the verdict (cross removed=%v, tick added=%v):\n%v",
-			removedCross, addedTick, *calls)
+			removedCross, addedTick, calls.all())
 	}
 
 	// And it is not left in the map to be corrected twice.
@@ -416,8 +441,8 @@ func TestASinglePieceCannotBeResent(t *testing.T) {
 		Author: discord.User{ID: "bot-1", Bot: true},
 	})
 
-	if !anyContains(*calls, EmojiFail) {
-		t.Errorf("resending one piece was not refused: %v", *calls)
+	if !anyContains(calls.all(), EmojiFail) {
+		t.Errorf("resending one piece was not refused: %v", calls.all())
 	}
 	// And it must not have gone anywhere near the radio.
 	b.pendMu.Lock()
@@ -446,8 +471,8 @@ func TestStrandedSendsAreAnsweredAfterARestart(t *testing.T) {
 
 	b.resolveStrandedSends(context.Background())
 
-	if !anyContains(*calls, EmojiFail) {
-		t.Errorf("a stranded send kept its hourglass: %v", *calls)
+	if !anyContains(calls.all(), EmojiFail) {
+		t.Errorf("a stranded send kept its hourglass: %v", calls.all())
 	}
 	var delivery string
 	if err := db.DB().QueryRow(`SELECT delivery FROM messages WHERE id = ?`, id).

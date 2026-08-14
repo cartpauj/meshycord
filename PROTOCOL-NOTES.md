@@ -263,7 +263,7 @@ The full set, read from `main` during the port:
                           0x90 CONTACTS_FULL
 ```
 
-The four the bridge acts on:
+The five the bridge acts on:
 
 - `0x83 MSG_WAITING` → send `CMD_SYNC_NEXT_MESSAGE` to fetch it. It is a
   coalescing signal, not a count: the node keeps the flag set until it answers
@@ -273,6 +273,7 @@ The four the bridge acts on:
 - `0x85` / `0x86` → a room-server login verdict. See below.
 - `0x80` / `0x8A` ADVERT → a contact was heard; a good moment to refresh a
   cache, and nothing more than that.
+- `0x88 LOG_RX_DATA` → every packet the radio hears. See below.
 
 `0x90 CONTACTS_FULL` is worth surfacing loudly: the node has stopped learning
 new contacts, which silently degrades routing.
@@ -280,6 +281,79 @@ new contacts, which silently degrades routing.
 Response codes (`RESP_CODE_*`) are direct replies to commands. `PACKET_OK` =
 `0x00`, `PACKET_ERROR` = `0x01`. Byte values are authoritative; names are
 aliases.
+
+### `0x88 LOG_RX_DATA` is a firehose nobody asked for
+
+`[0x88][snr x4 i8][rssi i8][raw packet...]`
+
+The node reports EVERY packet its radio hears, to whatever client is attached.
+There is no flag to enable it and no way to ask it to stop: `Dispatcher::checkRecv`
+calls `logRxRaw` before the packet is even parsed (`Dispatcher.cpp:199`), and the
+companion's override writes the frame whenever a client is connected
+(`companion_radio/MyMesh.cpp:286`). Corrupt frames and packet versions the
+firmware cannot read itself arrive here too.
+
+Two consequences, one bad and one good.
+
+**The bad one is bandwidth, and it is not this bridge's doing.** On ESP32 over
+BLE the send queue is FOUR frames deep, writes are spaced 60 ms apart
+(`BLE_WRITE_MIN_INTERVAL`), and an overflow is dropped with nothing but a debug
+print (`esp32/SerialBLEInterface.cpp:168`). On a busy mesh, rx-log frames compete
+for those slots with the frames that matter — delivery confirmations, incoming
+messages. nRF52 holds 12 (`nrf52/SerialBLEInterface.h:24`); USB serial has no
+queue at all and just writes. This happens whether or not anything reads the
+frames, so the mitigation is on our side: the raw-packet channel drops when full
+rather than blocking, and is consumed by a goroutine of its own so it can never
+get in front of anything else on the link.
+
+**The good one is that it is the only way to see a channel message land.**
+MeshCore cannot acknowledge group traffic, so the sole evidence a channel send
+reached anybody is hearing a repeater rebroadcast it. That works because group
+encryption is deterministic:
+
+```c
+// Mesh.cpp:540 createGroupDatagram
+memcpy(&packet->payload[len], channel.hash, PATH_HASH_SIZE); len += PATH_HASH_SIZE;
+len += Utils::encryptThenMAC(channel.secret, &packet->payload[len], data, data_len);
+```
+
+`Utils::encrypt` is AES-128 in **ECB mode with no IV**, zero-padding the last
+block (`Utils.cpp:85`). The plaintext is fully known locally
+(`BaseChatMesh.cpp:487`):
+
+```
+[timestamp u32 LE][0x00 = TXT_TYPE_PLAIN]["<name>: <text>"]
+```
+
+— our own timestamp, the node's own name, and the channel secret the node handed
+us via `CMD_GET_CHANNEL`. So the exact ciphertext we transmitted can be
+recomputed and matched byte-for-byte against the payloads coming back. A
+rebroadcast changes only the packet's path, never its payload, so the match holds
+at any hop count. This is the same thing the phone app's "Heard N repeats" line
+does, and it is computed the same way — by recognising our own packet, not by
+asking the node anything.
+
+Two details that matter for the match:
+
+- The firmware truncates `"name: text"` at `MAX_TEXT_LEN` with a **byte** cut
+  that ignores UTF-8 boundaries (`BaseChatMesh.cpp:496`). Reproduce it exactly or
+  the fingerprint will not match.
+- Only a copy with at least one hop in its path is evidence. A zero-hop copy is
+  an original transmission, not a rebroadcast.
+
+The wire layout to reach the payload, from `Dispatcher::tryParsePacket`:
+
+```
+[header]                       route 2b | payload type 4b | payload ver 2b
+[transport codes 4]            ONLY for route types 0x00 and 0x03
+[path_len]                     upper 2 bits = hash size - 1, lower 6 = hop count
+[path...]                      hop count x hash size
+[payload...]                   for GRP_TXT: [channel hash 1][MAC 2][ciphertext]
+```
+
+Skipping the transport codes is not optional: on those two route types
+everything after is shifted by four bytes, which silently compares the wrong
+bytes rather than failing.
 
 ### A room login can succeed and still refuse to let you post
 

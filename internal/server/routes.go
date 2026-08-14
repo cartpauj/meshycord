@@ -57,6 +57,7 @@ type page struct {
 	NextBefore           int64
 	ChunkCapacity        int
 	ChunkGapMS           int
+	HeardWindowMS        int
 	RetentionDays        int
 	RoomSessionSeconds   int
 	RoomKeepAliveSeconds int
@@ -491,6 +492,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	p.SerialPorts, _ = meshcore.FindSerialPorts()
 	p.ChunkCapacity = bridge.ChunkCapacity(meshcore.MaxMsgLen, s.cfg.MaxChunks())
 	p.ChunkGapMS = int(s.cfg.ChunkGap() / time.Millisecond)
+	p.HeardWindowMS = int(s.cfg.HeardWindow() / time.Millisecond)
 	p.RetentionDays = int(s.cfg.Retention() / (24 * time.Hour))
 	p.RoomSessionSeconds = int(s.cfg.RoomSessionTTL() / time.Second)
 	p.RoomKeepAliveSeconds = int(s.cfg.RoomKeepAlive() / time.Second)
@@ -553,6 +555,9 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	}
 	if n, err := strconv.Atoi(r.FormValue("chunk_gap")); err == nil && n >= 0 {
 		_ = s.cfg.SetChunkGapMS(n)
+	}
+	if n, err := strconv.Atoi(r.FormValue("heard_window")); err == nil && n > 0 {
+		_ = s.cfg.SetHeardWindowMS(n)
 	}
 	if n, err := strconv.Atoi(r.FormValue("retention")); err == nil && n >= 0 {
 		_ = s.cfg.SetRetentionDays(n)

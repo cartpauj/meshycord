@@ -241,9 +241,9 @@ marker saying what happened:
 
 | | |
 |---|---|
-| ⏳ | on the air, waiting for the recipient's node to confirm |
-| ✅ | the recipient's node acknowledged it |
-| 📡 | transmitted — no acknowledgement is possible |
+| ⏳ | on the air, waiting for an answer |
+| ✅ | the recipient's node acknowledged it — or, on a channel, the mesh was heard repeating it |
+| 📡 | transmitted, and nothing was heard of it afterwards |
 | ❌ | rejected, or no acknowledgement before the deadline |
 | 🧩 | too long for one transmission, so it was sent as several — see [Long messages](#long-messages) |
 | 🔄 | *you* add this to your own failed message to ask for a resend |
@@ -262,10 +262,28 @@ not a nicety: the node's send timeout does not clear its expected-ack entry, so
 a late acknowledgement genuinely does arrive, and a message that landed should
 not keep a cross that invites you to send it again.
 
-The difference between ✅ and 📡 is not decoration: **MeshCore cannot
-acknowledge group messages at all.** A channel send can only ever be reported as
-transmitted, and a tick there would claim a delivery the protocol is incapable of
-proving.
+The difference between ✅ and 📡 is not decoration, and what separates them
+depends on the route.
+
+For a direct message or a room post it is an acknowledgement: the far node says
+it has the message, or it does not.
+
+For a channel there is no acknowledgement to be had — **MeshCore cannot
+acknowledge group messages at all** — so the bridge listens for the message
+instead. Every packet the radio hears is reported to whatever is holding the
+link, group traffic is encrypted deterministically, and so the bridge can
+recognise its own message being rebroadcast by a repeater a second or two later.
+That is what a ✅ on a channel means: a repeater was heard passing it on. It is
+not a delivery receipt and nobody can say a human read it, but it is proof the
+message left the building and that at least one repeater took responsibility for
+it.
+
+📡 is what is left when the window closes in silence: the radio did transmit —
+the node accepted the message — and nothing in earshot was heard relaying it.
+That can mean no repeater is in range, or that the repeat was missed. It is not
+a failure, which is why it is not a ❌. The window is a few seconds and is set in
+Settings; the tick goes on the instant the first repeat arrives, not when the
+window ends.
 
 **Room servers do acknowledge posts** — but only from an account with
 READ_WRITE or better. A guest is admitted and then has every post discarded
@@ -478,10 +496,10 @@ The original's own marker follows its pieces: ✅ only if every piece was
 acknowledged, ❌ if any failed. A single missing transmission makes the whole
 message wrong at the far end, so the original says so.
 
-Mesh channels are the exception, and it is the protocol's doing rather than a
-choice: group messages cannot be acknowledged at all, so there is no outcome to
-wait for. Those pieces go out spaced by the courtesy gap in Settings, each
-marked 📡.
+Mesh channel pieces are not acknowledged, so they do not wait for each other:
+they go out spaced by the courtesy gap in Settings, and each one is answered by
+what the radio hears afterwards. The original is ticked only if every piece was
+heard being repeated, and wears 📡 if any of them went out unheard.
 
 ### Room servers
 
@@ -762,7 +780,8 @@ they are the shape of what a bridge like this can and cannot do:
   while the bridge holds the link, on any of the three transports.
 - **160 bytes** per message, less the node's own name on a group channel.
 - Group messages **cannot be acknowledged**, so delivery is never confirmable
-  for those. A ✅ there would claim something the protocol cannot prove.
+  for those. Hearing a repeater rebroadcast one is the strongest evidence
+  available, and that is all a ✅ on a channel claims.
 - **Only one route per received message is visible.** MeshCore deduplicates by
   packet hash below the app layer, so copies arriving by other routes are gone
   before the companion protocol sees them. The hop count shown describes one

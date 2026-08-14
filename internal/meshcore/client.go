@@ -74,6 +74,12 @@ type Session struct {
 	confirmations chan Confirmation
 	loginResults  chan LoginResult
 	adverts       chan struct{}
+	// rawPackets carries PushLogRxData: every packet the radio hears, whether
+	// or not it is addressed to us or even parseable. This is a firehose on a
+	// busy mesh and it is the one push where dropping is the NORMAL case, not a
+	// fault — a missed frame costs one delivery marker, while blocking the read
+	// loop would cost messages. Nothing here is ever waited for.
+	rawPackets chan RawPacket
 
 	// --- caches ------------------------------------------------------------
 	mu          sync.RWMutex
@@ -114,6 +120,7 @@ func NewSession(ctx context.Context, tr Transport, log *slog.Logger) (*Session, 
 		confirmations: make(chan Confirmation, 32),
 		loginResults:  make(chan LoginResult, 16),
 		adverts:       make(chan struct{}, 1),
+		rawPackets:    make(chan RawPacket, 64),
 		contacts:      make(map[string]Contact),
 		connectedAt:   time.Now(),
 		enumIdle:      EnumerationIdleTimeout,
@@ -167,6 +174,14 @@ func (s *Session) LoginResults() <-chan LoginResult { return s.loginResults }
 // Adverts fires when a contact is heard. A good moment to refresh the cache,
 // and nothing more than that.
 func (s *Session) Adverts() <-chan struct{} { return s.adverts }
+
+// RawPackets delivers every packet the radio hears, as the node reports it.
+//
+// Read this from a goroutine of its own and do nothing slow with it. The node
+// pushes one frame per packet received, unconditionally, whether anything is
+// listening or not; on a busy mesh that is far more traffic than anything else
+// on the link. Frames are dropped when the buffer is full, by design.
+func (s *Session) RawPackets() <-chan RawPacket { return s.rawPackets }
 
 // ---------------------------------------------------------------------------
 // Read loop
@@ -251,6 +266,19 @@ func (s *Session) handlePush(f []byte) {
 		select {
 		case s.adverts <- struct{}{}:
 		default:
+		}
+
+	case PushLogRxData:
+		p, err := DecodeLogRxData(f)
+		if err != nil {
+			// Not worth a word at any level above trace. The radio hears
+			// corrupt frames and packet versions this firmware cannot read
+			// itself, and every one of them lands here.
+			return
+		}
+		select {
+		case s.rawPackets <- p:
+		default: // nobody is listening, or listening slowly. See the field comment.
 		}
 
 	case PushContactsFull:
@@ -605,8 +633,56 @@ func (s *Session) SetDeviceTime(ctx context.Context, t time.Time) error {
 // messages, so the node answers with a plain OK and delivery is never
 // confirmable for these.
 func (s *Session) SendChannel(ctx context.Context, idx byte, text string) error {
-	_, err := s.expect(ctx, EncodeSendChannelTxtMsg(idx, text, time.Now()), RespOK, DefaultCommandTimeout)
+	_, err := s.SendChannelTracked(ctx, idx, text)
 	return err
+}
+
+// ChannelSend describes what one group message went out as.
+//
+// Cipher is the encrypted payload the node will have transmitted, which is the
+// message's fingerprint on the air: watch RawPackets for a group message
+// carrying these exact bytes and you are hearing your own message being
+// rebroadcast by a repeater. It is empty when the fingerprint cannot be worked
+// out — an unknown or secretless channel slot — and callers must treat that as
+// "no evidence available" rather than as failure.
+type ChannelSend struct {
+	Timestamp time.Time
+	Cipher    []byte
+}
+
+// SendChannelTracked sends a group message and reports how to recognise it
+// coming back.
+//
+// Same wire behaviour as SendChannel; the node still answers a plain OK and
+// still cannot acknowledge the message. The difference is that the caller can
+// afterwards find out whether anything on the mesh picked it up. See rawpkt.go
+// for why that is the only delivery evidence a channel send can ever have.
+func (s *Session) SendChannelTracked(ctx context.Context, idx byte, text string) (ChannelSend, error) {
+	// Whole seconds, because that is all the wire carries — and the fingerprint
+	// has to be computed from the value that was actually sent, not from a
+	// clock read a moment later.
+	ts := time.Unix(time.Now().Unix(), 0)
+	if _, err := s.expect(ctx, EncodeSendChannelTxtMsg(idx, text, ts), RespOK, DefaultCommandTimeout); err != nil {
+		return ChannelSend{}, err
+	}
+	send := ChannelSend{Timestamp: ts}
+	ch, ok := s.Channel(idx)
+	if !ok || ch.Secret == [ChannelSecretSize]byte{} {
+		// An unread slot, or one whose secret we have never been told. Without
+		// the key there is no fingerprint and no way to hear the message come
+		// back; the send itself is unaffected.
+		return send, nil
+	}
+	// The node truncates what we sent to MaxMsgLen before it ever sees the
+	// name prefix, so the fingerprint must start from the clamped form.
+	cipher, err := GroupTextCipher(ch.Secret[:], ts, s.SelfInfo().Name, clampToLimit(text))
+	if err != nil {
+		s.log.Debug("cannot fingerprint a channel message; repeats will not be heard",
+			"slot", idx, "err", err)
+		return send, nil
+	}
+	send.Cipher = cipher
+	return send, nil
 }
 
 // ---------------------------------------------------------------------------
